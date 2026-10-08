@@ -1,24 +1,25 @@
-// Command client 是 gks 的客户端。
+// Command client 是 gks 的客户端：在本地监听 SOCKS5，把 CONNECT 请求
+// 经 KCP（认证 + AEAD）转发给服务端。
 //
-// 当前为阶段二形态（dev.md §8）：与 Server 建立 KCP 会话、完成认证握手、
-// 发送若干 Session 级 echo 消息并打印回显，随后等待一次心跳 PONG 并打印统计。
-// 阶段三起将改为监听本地 SOCKS5 端口并转发 CONNECT。
+// 阶段三形态（dev.md §8）：每条本地 SOCKS5 连接使用一条独立 KCP Session，
+// 会话上开一条流承载该连接（连接池见阶段 5，多路复用见阶段 4）。
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/LiZeC123/gks/internal/client"
 	"github.com/LiZeC123/gks/internal/config"
 	"github.com/LiZeC123/gks/internal/log"
 	"github.com/LiZeC123/gks/internal/mux"
-	"github.com/LiZeC123/gks/internal/protocol"
 	"github.com/LiZeC123/gks/internal/transport"
 )
 
@@ -30,18 +31,8 @@ func main() {
 }
 
 func run() error {
-	var (
-		cfgPath   string
-		count     int
-		message   string
-		echoWait  time.Duration
-		hbTimeout time.Duration
-	)
+	var cfgPath string
 	flag.StringVar(&cfgPath, "c", "gks.yaml", "配置文件路径")
-	flag.IntVar(&count, "n", 3, "发送的 echo 消息条数")
-	flag.StringVar(&message, "msg", "hello gks", "echo 消息前缀")
-	flag.DurationVar(&echoWait, "echo-timeout", 5*time.Second, "单条 echo 的等待上限")
-	flag.DurationVar(&hbTimeout, "heartbeat-timeout", 10*time.Second, "等待一次心跳 PONG 的上限")
 	flag.Parse()
 
 	cfg, err := config.Load(cfgPath)
@@ -61,9 +52,6 @@ func run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	dialer := transport.NewDialer(transport.Options{
 		Interval:     cfg.Common.KCP.Interval.D(),
 		MTU:          cfg.Common.KCP.MTU,
@@ -74,78 +62,85 @@ func run() error {
 		Crypt:        cfg.Common.CryptName(),
 		PSK:          psk,
 	})
-	conn, err := dialer.Dial(cfg.Client.KCP.Server)
+
+	handler := client.NewHandler(client.HandlerConfig{
+		ServerAddr: cfg.Client.KCP.Server,
+		SessionOptions: mux.Options{
+			PSK:               psk,
+			AEAD:              cfg.Common.AEADName(),
+			AuthTimeout:       cfg.Client.KCP.AuthTimeout.D(),
+			HeartbeatInterval: cfg.Client.KCP.HeartbeatInterval.D(),
+			HeartbeatMiss:     cfg.Client.KCP.HeartbeatMiss,
+			StreamIdleTimeout: cfg.Common.Stream.IdleTimeout.D(),
+			MaxStreams:        cfg.Common.Limits.MaxStreamsPerSession,
+			MaxDataPayload:    cfg.Common.Limits.MaxDataPayload,
+			MaxFrameBody:      cfg.Common.Limits.MaxFrameBody,
+			Logger:            logger,
+		},
+		HandshakeTimeout: cfg.Client.Socks5.HandshakeTimeout.D(),
+		ConnectTimeout:   cfg.Client.Socks5.ConnectTimeout.D(),
+	}, dialer)
+
+	ln, err := net.Listen("tcp", cfg.Client.Listen)
 	if err != nil {
-		return err
+		return fmt.Errorf("监听 %s: %w", cfg.Client.Listen, err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	logger.Info("gks 客户端已启动",
+		log.Event, "client_start",
+		"listen", ln.Addr().String(),
+		"server", cfg.Client.KCP.Server,
+		"crypt", cfg.Common.CryptName(),
+		"aead", cfg.Common.AEADName(),
+		"heartbeat_interval", cfg.Client.KCP.HeartbeatInterval.D().String(),
+	)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		logger.Info("收到退出信号，停止接受新连接", log.Event, "shutdown")
+		_ = ln.Close()
+	}()
+
+	var wg sync.WaitGroup
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			logger.Warn("接受本地连接失败", log.Event, "accept_error", "err", err)
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			handler.Handle(ctx, conn)
+		}()
 	}
 
-	sess, err := mux.DialSession(ctx, conn, mux.Options{
-		PSK:               psk,
-		AEAD:              cfg.Common.AEADName(),
-		AuthTimeout:       cfg.Client.KCP.AuthTimeout.D(),
-		HeartbeatInterval: cfg.Client.KCP.HeartbeatInterval.D(),
-		HeartbeatMiss:     cfg.Client.KCP.HeartbeatMiss,
-		Logger:            logger,
-	})
-	if err != nil {
-		return fmt.Errorf("建立会话失败: %w", err)
-	}
-	defer func() { _ = sess.Close() }()
-
-	if err := runEchoes(ctx, sess, count, message, echoWait); err != nil {
-		return err
-	}
-	waitHeartbeat(sess, cfg.Client.KCP.HeartbeatInterval.D(), hbTimeout)
-
-	st := sess.Stats()
-	fmt.Printf("会话统计: conv=%d role=%s secure=%v frames_in=%d frames_out=%d pings_sent=%d pongs_recv=%d\n",
-		st.Conv, st.Role, st.Secure, st.FramesIn, st.FramesOut, st.PingsSent, st.PongsRecv)
-	if st.PingsSent > 0 && st.PongsRecv == 0 {
-		return errors.New("心跳未收到 PONG")
+	grace := cfg.Client.ShutdownGrace.D()
+	if waitTimeout(&wg, grace) {
+		logger.Info("所有本地连接已结束", log.Event, "client_stop")
+	} else {
+		logger.Warn("等待活跃连接超时，强制退出", log.Event, "client_stop", "grace", grace.String())
 	}
 	return nil
 }
 
-func runEchoes(ctx context.Context, sess *mux.Session, count int, prefix string, wait time.Duration) error {
-	echoCh := make(chan string, count)
-	sess.Handle(protocol.TypeTestEcho, func(_ *mux.Session, f protocol.Frame) {
-		select {
-		case echoCh <- string(f.Payload):
-		default:
-		}
-	})
-
-	for i := 1; i <= count; i++ {
-		msg := fmt.Sprintf("%s #%d", prefix, i)
-		if err := sess.SendControl(ctx, protocol.TypeTestEcho, []byte(msg)); err != nil {
-			return fmt.Errorf("发送 echo: %w", err)
-		}
-		select {
-		case got := <-echoCh:
-			fmt.Printf("发送: %s\n回显: %s\n", msg, got)
-		case <-time.After(wait):
-			return fmt.Errorf("等待第 %d 条 echo 回显超时（%s）", i, wait)
-		case <-sess.Done():
-			return fmt.Errorf("会话已关闭: %w", sess.Wait())
-		}
-	}
-	return nil
-}
-
-// waitHeartbeat 等待第一次 PONG。心跳未启用时直接返回。
-func waitHeartbeat(sess *mux.Session, interval, limit time.Duration) {
-	if interval <= 0 {
-		return
-	}
-	deadline := time.Now().Add(limit)
-	for time.Now().Before(deadline) {
-		if sess.PongsReceived() > 0 {
-			return
-		}
-		select {
-		case <-sess.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
+// waitTimeout 等待 wg 完成，最多等 d。
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }

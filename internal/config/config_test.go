@@ -91,7 +91,7 @@ func TestExampleConfigIsValid(t *testing.T) {
 	}
 
 	// client 段
-	if cfg.Client.Listen != "127.0.0.1:1080" {
+	if cfg.Client.Listen != "127.0.0.1:2080" {
 		t.Fatalf("client.listen = %q", cfg.Client.Listen)
 	}
 	if cfg.Client.KCP.Server != "127.0.0.1:4000" {
@@ -181,14 +181,14 @@ func TestLoadStrictUnknownField(t *testing.T) {
 	cases := map[string]string{
 		"顶层未知字段": `bogus: 1
 client:
-  listen: "127.0.0.1:1080"
+  listen: "127.0.0.1:2080"
 `,
 		"common 内未知字段": `common:
   psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
   nope: true
 `,
 		"client 内未知字段": `client:
-  listen: "127.0.0.1:1080"
+  listen: "127.0.0.1:2080"
   nope: true
 `,
 		"common.kcp 内未知字段": `common:
@@ -302,7 +302,7 @@ func TestClientValidateErrors(t *testing.T) {
 		wantSub string
 	}{
 		{"listen 缺端口", func(s string) string {
-			return strings.Replace(s, `listen: "127.0.0.1:1080"`, `listen: "127.0.0.1"`, 1)
+			return strings.Replace(s, `listen: "127.0.0.1:2080"`, `listen: "127.0.0.1"`, 1)
 		}, "client.listen"},
 		{"server 地址缺主机", func(s string) string {
 			return strings.Replace(s, `server: "127.0.0.1:4000"`, `server: ":4000"`, 1)
@@ -313,6 +313,9 @@ func TestClientValidateErrors(t *testing.T) {
 		{"handshake_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "handshake_timeout: 10s", "handshake_timeout: 0s", 1)
 		}, "client.socks5.handshake_timeout"},
+		{"connect_timeout 为 0", func(s string) string {
+			return strings.Replace(s, "connect_timeout: 10s", "connect_timeout: 0s", 1)
+		}, "client.socks5.connect_timeout"},
 		{"pool.size 为 0", func(s string) string { return strings.Replace(s, "size: 2", "size: 0", 1) }, "client.pool.size"},
 		{"max_sessions 小于 size", func(s string) string { return strings.Replace(s, "max_sessions: 8", "max_sessions: 1", 1) }, "client.pool.max_sessions"},
 		{"pool.idle_timeout 为 0", func(s string) string {

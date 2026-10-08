@@ -1,15 +1,13 @@
 // Command server 是 gks 的服务端。
 //
-// 当前为阶段二形态（dev.md §8）：接受 KCP 会话、完成认证握手（AUTH_REQ/AUTH_RESP）、
-// 回显 Session 级 echo 帧并响应心跳。阶段三起将由「拨号目标并转发」取代 echo。
+// 阶段三形态（dev.md §8）：接受 KCP 会话、完成认证握手，按 CONNECT_REQ 拨号目标
+// 并双向转发（DATA/FIN/RST）。
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -20,12 +18,9 @@ import (
 	"github.com/LiZeC123/gks/internal/log"
 	"github.com/LiZeC123/gks/internal/mux"
 	"github.com/LiZeC123/gks/internal/protocol"
+	"github.com/LiZeC123/gks/internal/server"
 	"github.com/LiZeC123/gks/internal/transport"
 )
-
-// goAwayFlushDelay 是发送 GOAWAY 后留给写循环的冲刷时间（阶段二的简化实现，
-// 阶段六会替换为真正的「等待活跃流结束」）。
-const goAwayFlushDelay = 200 * time.Millisecond
 
 func main() {
 	if err := run(); err != nil {
@@ -83,17 +78,26 @@ func run() error {
 		"listen", tln.Addr().String(),
 		"crypt", cfg.Common.CryptName(),
 		"aead", cfg.Common.AEADName(),
+		"dial_timeout", cfg.Server.Dial.Timeout.D().String(),
 	)
 
-	// 服务端不发心跳（配置中没有该字段），只负责响应 PING；客户端负责保活。
-	opts := mux.Options{
-		PSK:             psk,
-		AEAD:            cfg.Common.AEADName(),
-		AuthTimeout:     cfg.Server.Auth.AuthTimeout.D(),
-		TimestampWindow: cfg.Server.Auth.TimestampWindow.D(),
-		ReplayCache:     replay,
-		Logger:          logger,
-	}
+	// 服务端不发心跳（配置中没有该字段），只响应 PING；保活由客户端负责。
+	handler := server.NewHandler(server.HandlerConfig{
+		SessionOptions: mux.Options{
+			PSK:               psk,
+			AEAD:              cfg.Common.AEADName(),
+			AuthTimeout:       cfg.Server.Auth.AuthTimeout.D(),
+			TimestampWindow:   cfg.Server.Auth.TimestampWindow.D(),
+			ReplayCache:       replay,
+			StreamIdleTimeout: cfg.Common.Stream.IdleTimeout.D(),
+			MaxStreams:        cfg.Common.Limits.MaxStreamsPerSession,
+			MaxDataPayload:    cfg.Common.Limits.MaxDataPayload,
+			MaxFrameBody:      cfg.Common.Limits.MaxFrameBody,
+			Logger:            logger,
+		},
+		DialTimeout: cfg.Server.Dial.Timeout.D(),
+		Keepalive:   cfg.Server.Dial.Keepalive.D(),
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -132,7 +136,7 @@ func run() error {
 		go func() {
 			defer wg.Done()
 			defer func() { <-pending }()
-			handleSession(ctx, conn, opts, logger)
+			handler.Handle(ctx, conn)
 		}()
 	}
 
@@ -143,63 +147,6 @@ func run() error {
 		logger.Warn("等待活跃会话超时，强制退出", log.Event, "server_stop", "grace", grace.String())
 	}
 	return nil
-}
-
-// handleSession 完成一条会话的认证与（阶段二的）echo 处理。
-func handleSession(ctx context.Context, conn net.Conn, opts mux.Options, logger *slog.Logger) {
-	defer func() {
-		if r := recover(); r != nil {
-			// panic 隔离：单个会话的问题不得影响进程（dev.md §11.6）。
-			logger.Error("会话处理 panic",
-				log.Event, "panic",
-				log.Remote, conn.RemoteAddr().String(),
-				"panic", fmt.Sprint(r),
-			)
-			_ = conn.Close()
-		}
-	}()
-
-	sess, err := mux.AcceptSession(ctx, conn, opts)
-	if err != nil {
-		logger.Warn("会话认证失败",
-			log.Event, "auth_failed",
-			log.Remote, conn.RemoteAddr().String(),
-			"err", err,
-		)
-		return
-	}
-	defer func() { _ = sess.Close() }()
-
-	// 阶段二：Session 级 echo（TypeTestEcho 仅用于联调，阶段三移除）。
-	sess.Handle(protocol.TypeTestEcho, func(s *mux.Session, f protocol.Frame) {
-		sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.SendControl(sendCtx, protocol.TypeTestEcho, f.Payload); err != nil {
-			logger.Debug("echo 回发失败", log.Event, "echo_error", "err", err)
-		}
-	})
-
-	select {
-	case <-sess.Done():
-	case <-ctx.Done():
-		sendCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = sess.SendControl(sendCtx, protocol.TypeGoAway, nil)
-		cancel()
-		time.Sleep(goAwayFlushDelay)
-	}
-	logger.Info("会话结束", log.Event, "session_end", "stats", statsFields(sess))
-}
-
-func statsFields(s *mux.Session) []any {
-	st := s.Stats()
-	return []any{
-		log.SessionID, st.Conv,
-		log.Remote, st.Remote,
-		"frames_in", st.FramesIn,
-		"frames_out", st.FramesOut,
-		"pings_sent", st.PingsSent,
-		"pongs_recv", st.PongsRecv,
-	}
 }
 
 // waitTimeout 等待 wg 完成，最多等 d。

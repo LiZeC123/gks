@@ -131,7 +131,10 @@ type UserPass struct {
 
 // Socks5 是本地 SOCKS5 服务设置。
 type Socks5 struct {
+	// HandshakeTimeout 覆盖「方法协商 + 请求解析」。
 	HandshakeTimeout Duration `yaml:"handshake_timeout"`
+	// ConnectTimeout 覆盖「等待服务端 CONNECT_RESP」。
+	ConnectTimeout Duration `yaml:"connect_timeout"`
 }
 
 // Pool 是 KCP Session 池设置。
@@ -274,6 +277,7 @@ func (c *Client) Validate() error {
 	p.require(len(c.Auth.Users) == 0, "client.auth.users: userpass 尚未实现，必须为空")
 
 	p.require(c.Socks5.HandshakeTimeout.D() > 0, "client.socks5.handshake_timeout: 必须大于 0")
+	p.require(c.Socks5.ConnectTimeout.D() > 0, "client.socks5.connect_timeout: 必须大于 0")
 	p.require(c.Pool.Size >= MinPoolSize && c.Pool.Size <= MaxPoolSize,
 		"client.pool.size: 需在 [%d,%d]，实际 %d", MinPoolSize, MaxPoolSize, c.Pool.Size)
 	p.require(c.Pool.MaxSessions >= MinPoolSize && c.Pool.MaxSessions <= MaxPoolSessions,

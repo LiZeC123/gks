@@ -82,7 +82,16 @@ type Options struct {
 	HeartbeatMiss int
 	// WriteQueue 是发送队列长度，默认 1024。
 	WriteQueue int
-	Logger     *slog.Logger
+	// StreamIdleTimeout 是单流接收缓冲被写满后允许的最长阻塞时间；
+	// 超过则重置该流（RST）以保护整条会话（dev.md §3.7）。默认 600s。
+	StreamIdleTimeout time.Duration
+	// MaxStreams 是单会话流数上限，默认 256。
+	MaxStreams int
+	// MaxDataPayload 是单帧 DATA 的 Payload 上限，默认 protocol.MaxDataPayload。
+	MaxDataPayload int
+	// MaxFrameBody 是接收侧单帧帧体上限，默认 protocol.MaxFrameBody。
+	MaxFrameBody int
+	Logger       *slog.Logger
 	// Now 与 Rand 可为空，测试时可注入。
 	Now  func() time.Time
 	Rand io.Reader
@@ -109,6 +118,18 @@ func (o *Options) normalize() error {
 	}
 	if o.WriteQueue <= 0 {
 		o.WriteQueue = 1024
+	}
+	if o.StreamIdleTimeout <= 0 {
+		o.StreamIdleTimeout = 600 * time.Second
+	}
+	if o.MaxStreams <= 0 {
+		o.MaxStreams = 256
+	}
+	if o.MaxDataPayload <= 0 || o.MaxDataPayload > protocol.MaxFrameBody {
+		o.MaxDataPayload = protocol.MaxDataPayload
+	}
+	if o.MaxFrameBody <= 0 || o.MaxFrameBody > protocol.MaxFrameBody {
+		o.MaxFrameBody = protocol.MaxFrameBody
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -169,6 +190,11 @@ type Session struct {
 	handlersMu sync.RWMutex
 	handlers   map[protocol.Type]Handler
 
+	// streams 是 StreamID → 流的映射；nextStreamID 由客户端侧单调递增分配（奇数）。
+	streamsMu    sync.Mutex
+	streams      map[uint32]*stream
+	nextStreamID uint32
+
 	hb *heartbeatState
 
 	wg sync.WaitGroup
@@ -186,13 +212,15 @@ func newSession(conn net.Conn, opts Options) (*Session, error) {
 	}
 	conv := convOf(conn)
 	s := &Session{
-		conn:   conn,
-		role:   opts.Role,
-		opts:   opts,
-		conv:   conv,
-		sendCh: make(chan protocol.Frame, opts.WriteQueue),
-		closed: make(chan struct{}),
-		hb:     &heartbeatState{miss: opts.HeartbeatMiss},
+		conn:         conn,
+		role:         opts.Role,
+		opts:         opts,
+		conv:         conv,
+		sendCh:       make(chan protocol.Frame, opts.WriteQueue),
+		closed:       make(chan struct{}),
+		streams:      make(map[uint32]*stream),
+		nextStreamID: 1,
+		hb:           &heartbeatState{miss: opts.HeartbeatMiss},
 	}
 	s.log = log.WithSession(opts.Logger, conv, conn.RemoteAddr().String()).With("role", opts.Role.String())
 	return s, nil
@@ -281,7 +309,7 @@ func (s *Session) clientHandshake() error {
 		if _, err := s.conn.Write(raw); err != nil {
 			return fmt.Errorf("mux: 发送 AUTH_REQ: %w", err)
 		}
-		hdr, body, err := protocol.ReadFrame(s.conn, protocol.MaxFrameBody)
+		hdr, body, err := protocol.ReadFrame(s.conn, uint32(s.opts.MaxFrameBody))
 		if err != nil {
 			return fmt.Errorf("mux: 读取 AUTH_RESP: %w", err)
 		}
@@ -330,7 +358,7 @@ func (s *Session) serverHandshake() error {
 		resp protocol.AuthResponse
 	)
 	err = s.withAuthDeadline(func() error {
-		hdr, body, err := protocol.ReadFrame(s.conn, protocol.MaxFrameBody)
+		hdr, body, err := protocol.ReadFrame(s.conn, uint32(s.opts.MaxFrameBody))
 		if err != nil {
 			return fmt.Errorf("mux: 读取 AUTH_REQ: %w", err)
 		}
@@ -403,7 +431,7 @@ func (s *Session) start() {
 func (s *Session) readLoop() {
 	defer s.wg.Done()
 	for {
-		hdr, body, err := protocol.ReadFrame(s.conn, protocol.MaxFrameBody)
+		hdr, body, err := protocol.ReadFrame(s.conn, uint32(s.opts.MaxFrameBody))
 		if err != nil {
 			s.closeWith(fmt.Errorf("mux: 读取帧失败: %w", err))
 			return
@@ -419,9 +447,21 @@ func (s *Session) readLoop() {
 	}
 }
 
-// dispatch 分发一帧。PING/PONG/GOAWAY/ERROR 由 Session 直接处理。
+// dispatch 分发一帧。
+//
+// 流数据帧（DATA/FIN/RST）与 PING/PONG/GOAWAY/ERROR 由 Session 直接处理，
+// 其余类型（如 CONNECT_REQ/CONNECT_RESP）交给应用注册的 Handler。
 func (s *Session) dispatch(f protocol.Frame) {
 	switch f.Type {
+	case protocol.TypeData:
+		s.deliverData(f)
+		return
+	case protocol.TypeFin:
+		s.deliverFin(f)
+		return
+	case protocol.TypeRst:
+		s.deliverRst(f)
+		return
 	case protocol.TypePing:
 		// 回显 payload，便于对端校验（dev.md §3.9）。
 		ctx, cancel := context.WithTimeout(context.Background(), heartbeatSendTimeout)
@@ -616,6 +656,8 @@ func (s *Session) closeWith(err error) {
 		s.errMu.Unlock()
 		close(s.closed)
 		_ = s.conn.Close()
+		// 会话关闭等于向所有流广播 RST（dev.md §3.8）。
+		s.resetAllStreams(ErrSessionClosed)
 		s.log.Info("会话关闭",
 			log.Event, "session_down",
 			"err", err,
