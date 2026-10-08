@@ -56,6 +56,19 @@ type TransportStats struct {
 	LostSegs         uint64
 	RepeatSegs       uint64
 	KCPInErrors      uint64
+	// FEC 相关（未启用 FEC 时恒为 0）
+	FECRecovered uint64
+	FECErrs      uint64
+}
+
+// PoolStats 是会话池的关键状态（由调用方注入，metrics 不依赖 client 包）。
+type PoolStats struct {
+	Sessions int
+	InUse    int
+	Idle     int
+	Creating int
+	Waiters  int
+	Rebuilds uint64
 }
 
 // RegistrySnapshot 是注册表在某一时刻的取值。
@@ -72,15 +85,16 @@ type RegistrySnapshot struct {
 	DialFailures        uint64
 }
 
-// Snapshot 是注册表 + 传输层的完整快照。
+// Snapshot 是注册表 + 传输层 + 会话池的完整快照。
 type Snapshot struct {
 	At        time.Time
 	Registry  RegistrySnapshot
 	Transport TransportStats
+	Pool      PoolStats
 }
 
 // Take 采集一次快照。
-func (r *Registry) Take(transport TransportStats, now time.Time) Snapshot {
+func (r *Registry) Take(transport TransportStats, pool PoolStats, now time.Time) Snapshot {
 	if r == nil {
 		r = Default
 	}
@@ -99,6 +113,7 @@ func (r *Registry) Take(transport TransportStats, now time.Time) Snapshot {
 			DialFailures:        r.DialFailures.Load(),
 		},
 		Transport: transport,
+		Pool:      pool,
 	}
 }
 
@@ -115,17 +130,26 @@ type Sample struct {
 	WireRecvBps float64
 
 	// RetransRate 是本次区间内「重传段 / 发送段」，可看作链路丢包的代理指标。
-	RetransRate      float64
-	OutSegsDelta     uint64
-	LostSegsDelta    uint64
-	RepeatSegsDelta  uint64
-	KCPInErrorsDelta uint64
+	RetransRate       float64
+	OutSegsDelta      uint64
+	LostSegsDelta     uint64
+	RepeatSegsDelta   uint64
+	KCPInErrorsDelta  uint64
+	FECRecoveredDelta uint64
+	FECErrsDelta      uint64
+}
+
+// Sources 提供外部数据来源（传输层与会话池）；为 nil 时对应数据按 0 处理。
+type Sources struct {
+	Transport func() TransportStats
+	Pool      func() PoolStats
 }
 
 // Sampler 周期性地采集快照并计算速率。
 type Sampler struct {
 	reg       *Registry
 	transport func() TransportStats
+	pool      func() PoolStats
 	interval  time.Duration
 	logger    *slog.Logger
 
@@ -133,18 +157,21 @@ type Sampler struct {
 	prev *Snapshot
 }
 
-// NewSampler 构造采样器。transport 为 nil 时传输层数据全为 0。
-func NewSampler(reg *Registry, interval time.Duration, logger *slog.Logger, transport func() TransportStats) *Sampler {
+// NewSampler 构造采样器。
+func NewSampler(reg *Registry, interval time.Duration, logger *slog.Logger, src Sources) *Sampler {
 	if reg == nil {
 		reg = Default
 	}
-	if transport == nil {
-		transport = func() TransportStats { return TransportStats{} }
+	if src.Transport == nil {
+		src.Transport = func() TransportStats { return TransportStats{} }
+	}
+	if src.Pool == nil {
+		src.Pool = func() PoolStats { return PoolStats{} }
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Sampler{reg: reg, interval: interval, logger: logger, transport: transport}
+	return &Sampler{reg: reg, interval: interval, logger: logger, transport: src.Transport, pool: src.Pool}
 }
 
 // Interval 返回采样间隔。
@@ -154,7 +181,7 @@ func (s *Sampler) Interval() time.Duration { return s.interval }
 func (s *Sampler) Sample() Sample { return s.sampleAt(time.Now()) }
 
 func (s *Sampler) sampleAt(now time.Time) Sample {
-	cur := s.reg.Take(s.transport(), now)
+	cur := s.reg.Take(s.transport(), s.pool(), now)
 
 	s.mu.Lock()
 	prev := s.prev
@@ -178,6 +205,8 @@ func (s *Sampler) sampleAt(now time.Time) Sample {
 	smp.LostSegsDelta = sub(cur.Transport.LostSegs, prev.Transport.LostSegs)
 	smp.RepeatSegsDelta = sub(cur.Transport.RepeatSegs, prev.Transport.RepeatSegs)
 	smp.KCPInErrorsDelta = sub(cur.Transport.KCPInErrors, prev.Transport.KCPInErrors)
+	smp.FECRecoveredDelta = sub(cur.Transport.FECRecovered, prev.Transport.FECRecovered)
+	smp.FECErrsDelta = sub(cur.Transport.FECErrs, prev.Transport.FECErrs)
 
 	smp.OutSegsDelta = sub(cur.Transport.OutSegs, prev.Transport.OutSegs)
 	if smp.OutSegsDelta > 0 {
@@ -224,7 +253,14 @@ func (s *Sampler) Log(smp Sample) {
 		"retrans", retransField(smp),
 		"lost_segs", smp.LostSegsDelta,
 		"repeat_segs", smp.RepeatSegsDelta,
+		"fec_recovered", smp.FECRecoveredDelta,
+		"fec_errs", smp.FECErrsDelta,
 		"kcp_in_errors", smp.KCPInErrorsDelta,
+		"pool_in_use", smp.Current.Pool.InUse,
+		"pool_idle", smp.Current.Pool.Idle,
+		"pool_creating", smp.Current.Pool.Creating,
+		"pool_waiters", smp.Current.Pool.Waiters,
+		"pool_rebuilds", smp.Current.Pool.Rebuilds,
 		"errors", fmt.Sprintf("auth=%d session=%d socks5=%d dial=%d",
 			r.AuthFailures, r.SessionDialFailures, r.Socks5Failures, r.DialFailures),
 	)

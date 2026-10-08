@@ -114,7 +114,9 @@ func run() error {
 	}()
 
 	// 传输统计：每 metrics_interval 打一行（0 表示关闭）。
-	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, transport.SnmpStats)
+	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, metrics.Sources{
+		Transport: transport.SnmpStats,
+	})
 	go sampler.Run(ctx)
 
 	for {

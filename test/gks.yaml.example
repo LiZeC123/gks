@@ -25,8 +25,8 @@ common:
     mtu: 1350                        # 避免 IP 分片
     sndwnd: 256                      # 发送窗口
     rcvwnd: 256                      # 接收窗口
-    data_shards: 0                   # FEC，0 = 关闭
-    parity_shards: 0
+    data_shards: 10                  # FEC：10 数据 + 3 校验（0 = 关闭）
+    parity_shards: 3                 # 丢包链路建议开启（线开销约 +30%，换来免重传的低抖动）
   stream:
     idle_timeout: 600s               # 流长时间无数据则 RST
   limits:
@@ -45,7 +45,7 @@ client:
     connect_timeout: 10s             # 等待服务端 CONNECT_RESP
   pool:
     size: 2                          # 初始/保底 Session 数
-    max_sessions: 8                  # Session 数硬上限
+    max_sessions: 64                 # Session 数硬上限 = 并发连接上限（每条会话同时 1 条流）
     idle_timeout: 300s               # 空闲 Session 回收
     startup_jitter: 300ms            # 启动错峰：相邻 Session 建立间隔随机
     connect_timeout: 5s              # 等待可用 Session 的上限

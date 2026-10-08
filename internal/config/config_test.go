@@ -274,8 +274,13 @@ func TestCommonValidateErrors(t *testing.T) {
 		{"max_data_payload 过大", func(s string) string {
 			return strings.Replace(s, "max_data_payload: 16384", "max_data_payload: 65530", 1)
 		}, "common.limits.max_data_payload"},
+		{"FEC 分片总数超限", func(s string) string {
+			s = strings.Replace(s, "data_shards: 10", "data_shards: 200", 1)
+			return strings.Replace(s, "parity_shards: 3", "parity_shards: 100", 1)
+		}, "common.kcp.data_shards+parity_shards"},
 		{"FEC 只给 data_shards", func(s string) string {
-			return strings.Replace(s, "data_shards: 0", "data_shards: 10", 1)
+			// 示例默认开启 FEC（10/3）：把校验分片清零即等价于「只给 data_shards」。
+			return strings.Replace(s, "parity_shards: 3", "parity_shards: 0", 1)
 		}, "common.kcp.parity_shards"},
 	}
 	for _, tc := range cases {
@@ -317,7 +322,7 @@ func TestClientValidateErrors(t *testing.T) {
 			return strings.Replace(s, "connect_timeout: 10s", "connect_timeout: 0s", 1)
 		}, "client.socks5.connect_timeout"},
 		{"pool.size 为 0", func(s string) string { return strings.Replace(s, "size: 2", "size: 0", 1) }, "client.pool.size"},
-		{"max_sessions 小于 size", func(s string) string { return strings.Replace(s, "max_sessions: 8", "max_sessions: 1", 1) }, "client.pool.max_sessions"},
+		{"max_sessions 小于 size", func(s string) string { return strings.Replace(s, "max_sessions: 64", "max_sessions: 1", 1) }, "client.pool.max_sessions"},
 		{"pool.idle_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "idle_timeout: 300s", "idle_timeout: 0s", 1)
 		}, "client.pool.idle_timeout"},

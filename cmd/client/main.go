@@ -122,7 +122,21 @@ func run() error {
 	}()
 
 	// 传输统计：每 metrics_interval 打一行（0 表示关闭）。
-	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, transport.SnmpStats)
+	// 传输层来自 kcp-go 的全局 Snmp，池状态来自会话池，二者都不依赖具体实现细节。
+	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, metrics.Sources{
+		Transport: transport.SnmpStats,
+		Pool: func() metrics.PoolStats {
+			st := pool.Stats()
+			return metrics.PoolStats{
+				Sessions: st.Sessions,
+				InUse:    st.InUse,
+				Idle:     st.Idle,
+				Creating: st.Creating,
+				Waiters:  st.Waiters,
+				Rebuilds: st.Rebuilds,
+			}
+		},
+	})
 	go sampler.Run(ctx)
 
 	// 预热并维护会话池（保底重建 + 空闲回收）。

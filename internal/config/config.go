@@ -189,7 +189,9 @@ const (
 	MinPoolSize       = 1
 	MaxPoolSize       = 16
 	MaxStreamsPerSess = 32768
-	MaxPoolSessions   = 16
+	MaxPoolSessions   = 128
+	// MaxFECShards 是 reedsolomon 允许的分片总数上限（data+parity）。
+	MaxFECShards      = 256
 	AllowedCryptNames = "none|aes-128-gcm|aes-256-gcm|aes-128|aes-256|salsa20"
 	LocalAuthNone     = "none"
 	LocalAuthUserPass = "userpass"
@@ -390,6 +392,11 @@ func validateKCPTuning(p *problems, prefix string, k *KCPTuning) {
 	p.require(k.ParityShards >= 0, "%s.parity_shards: 不能为负", prefix)
 	p.require(k.DataShards == 0 || k.ParityShards > 0,
 		"%s.parity_shards: 启用 FEC 时 parity_shards 必须大于 0", prefix)
+	if k.DataShards > 0 && k.ParityShards > 0 {
+		p.require(k.DataShards+k.ParityShards <= MaxFECShards,
+			"%s.data_shards+parity_shards: 不能超过 %d（实际 %d）",
+			prefix, MaxFECShards, k.DataShards+k.ParityShards)
+	}
 }
 
 func validateLevel(p *problems, prefix, level string) {

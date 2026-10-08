@@ -23,5 +23,7 @@ func SnmpStats() metrics.TransportStats {
 		LostSegs:         s.LostSegs,
 		RepeatSegs:       s.RepeatSegs,
 		KCPInErrors:      s.KCPInErrors,
+		FECRecovered:     s.FECRecovered,
+		FECErrs:          s.FECErrs,
 	}
 }

@@ -76,7 +76,7 @@ curl --socks5 127.0.0.1:2080 http://www.baidu.com
 
 | 段 | 内容 | 为什么这样分 |
 | --- | --- | --- |
-| `common` | `psk`、`crypt`、`aead`、`kcp`（interval/mtu/window/FEC）、`stream.idle_timeout`、`limits`（流数上限、帧体上限、单帧 Payload 上限）、`metrics_interval` | **两端必须一致**，只写一次就不存在写岔的可能 |
+| `common` | `psk`、`crypt`、`aead`、`kcp`（interval/mtu/window/**FEC**）、`stream.idle_timeout`、`limits`（流数上限、帧体上限、单帧 Payload 上限）、`metrics_interval` | **两端必须一致**，只写一次就不存在写岔的可能 |
 | `client` | `listen`（默认 `127.0.0.1:2080`）、`socks5`（握手/连接超时）、`auth`、连接池、服务端地址、心跳、日志级别 | 仅客户端使用 |
 | `server` | `listen`、认证窗口与重放缓存、拨号超时、日志级别 | 仅服务端使用 |
 
@@ -85,6 +85,8 @@ curl --socks5 127.0.0.1:2080 http://www.baidu.com
 - `common.aead`：`chacha20-poly1305`（默认）或 `aes-256-gcm`。
 - `common.crypt`：`none`（默认，阶段 B）或 `aes-128-gcm` 等（阶段 A，见 dev.md §0.3）。
 - `client.auth.mode` 目前只支持 `none`；`userpass` 尚未实现（配置中出现会直接报错）。
+- `common.kcp.data_shards` / `parity_shards` 是 FEC：示例默认 **10/3**（丢包链路）。实测在无丢包的 loopback 上，开 FEC 会让线开销从 2.1% 升到 **34.6%**、payload 吞吐降约 20%，所以**链路干净时可以关掉**（置 0）；链路丢包时它用带宽换掉重传，通常净赚。
+- `client.pool.max_sessions` 在当前（保守）形态下**就是并发连接上限**：超出部分会排队，等待超过 `client.pool.connect_timeout` 才回 SOCKS5 `0x01`。实测浏览型负载峰值并发 20+，示例取 64；上限 128，且每条会话占用客户端 1 个 UDP socket，`max_sessions` 很大时要留意 `ulimit -n`。
 - 校验用 `errors.Join`，会**一次性报出** `common` 与该端段落里的所有问题。
 
 ## 观测：传输速率与链路质量
@@ -101,6 +103,8 @@ level=INFO msg=传输统计 event=metrics interval=1s sessions=1 streams=1 \
 - `payload_*` 是**隧道载荷**速率（实时累加），`wire_*` 是 **UDP 线速率**（来自 kcp-go 的 `DefaultSnmp`）；两者之比就是链路开销。
 - 客户端 `payload_recv_total` 应约等于服务端 `payload_sent_total`（反之亦然），不等说明有流被中途重置。
 - `retrans` 是本区间「重传段 / 发送段」（发送段 < 20 时显示 `n/a`）；持续 > 1% 通常意味着 UDP 丢包或限速。
+- `fec_recovered` / `fec_errs`：FEC 恢复出的包数与恢复失败数。**`fec_recovered > 0` 说明 FEC 正在生效**；配合 `retrans`/`repeat_segs` 一起看就能判断该不该继续加大 FEC。
+- `pool_in_use` / `pool_idle` / `pool_creating` / `pool_waiters` / `pool_rebuilds`：会话池状态。**`pool_waiters > 0` 表示并发已经顶到 `max_sessions`**，需要调大上限。
 - `errors` 分别统计认证失败 / 建会话失败 / 本地 SOCKS5 失败 / 目标拨号失败。
 - `sessions` 现在反映的是**池内会话数**（保底 `pool.size`，并发时最多到 `pool.max_sessions`），因此它不再随连接数线性增长——这正是连接池的收益。
 
@@ -110,8 +114,10 @@ level=INFO msg=传输统计 event=metrics interval=1s sessions=1 streams=1 \
 | --- | --- |
 | 100MB 经代理下载 | 载荷 ≈ 214 MB/s（约 1.7 Gbit/s） |
 | 同上，直连 loopback 对照 | ≈ 1.78 GB/s |
-| 线/载荷 开销比 | ≈ 1.02（2%） |
-| retrans | 0%（loopback） |
+| 线/载荷 开销比（FEC 关） | ≈ 1.02（2%） |
+| 线/载荷 开销比（FEC 10/3） | ≈ 1.35（+34.6%） |
+| 100MB 下载（FEC 10/3） | 161 MB/s（相比关闭时 -20%） |
+| retrans / repeat_segs | 0%（loopback 无丢包；丢包链路上看两端对照） |
 
 需要**精确**的线速率、包长分布与重传时，可在自己机器上抓包（沙箱内无权限）：
 

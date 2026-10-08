@@ -84,10 +84,14 @@ func TestRegistryTake(t *testing.T) {
 
 	now := time.Unix(1700000000, 0)
 	ts := TransportStats{UDPBytesSent: 900, OutSegs: 42}
-	snap := reg.Take(ts, now)
+	pool := PoolStats{Sessions: 3, InUse: 2, Idle: 1, Creating: 1, Waiters: 4, Rebuilds: 5}
+	snap := reg.Take(ts, pool, now)
 
 	if !snap.At.Equal(now) || snap.Transport != ts {
 		t.Fatalf("快照元数据不对: %+v", snap)
+	}
+	if snap.Pool != pool {
+		t.Fatalf("池快照 = %+v，期望 %+v", snap.Pool, pool)
 	}
 	r := snap.Registry
 	if r.SessionsActive != 3 || r.StreamsActive != 7 || r.SessionsTotal != 10 || r.StreamsTotal != 20 {
@@ -115,9 +119,11 @@ func TestSamplerRates(t *testing.T) {
 		LostSegs:         4,
 		RepeatSegs:       2,
 		KCPInErrors:      1,
+		FECRecovered:     100,
+		FECErrs:          1,
 	}
 	var cur TransportStats
-	s := NewSampler(reg, time.Second, discardLogger(), func() TransportStats { return cur })
+	s := NewSampler(reg, time.Second, discardLogger(), Sources{Transport: func() TransportStats { return cur }})
 	cur = transport
 
 	t0 := time.Unix(1700000000, 0)
@@ -141,6 +147,8 @@ func TestSamplerRates(t *testing.T) {
 		LostSegs:         4 + 6,
 		RepeatSegs:       2 + 3,
 		KCPInErrors:      1 + 1,
+		FECRecovered:     100 + 40,
+		FECErrs:          1 + 2,
 	}
 	second := s.sampleAt(t0.Add(2 * time.Second))
 
@@ -165,13 +173,16 @@ func TestSamplerRates(t *testing.T) {
 	if second.LostSegsDelta != 6 || second.RepeatSegsDelta != 3 || second.KCPInErrorsDelta != 1 {
 		t.Fatalf("段增量不对: %+v", second)
 	}
+	if second.FECRecoveredDelta != 40 || second.FECErrsDelta != 2 {
+		t.Fatalf("FEC 增量不对: recovered=%d errs=%d", second.FECRecoveredDelta, second.FECErrsDelta)
+	}
 }
 
 func TestSamplerZeroIntervalSample(t *testing.T) {
 	reg := &Registry{}
 	reg.PayloadSent.Add(100)
 	cur := TransportStats{UDPBytesSent: 1000, OutSegs: 10}
-	s := NewSampler(reg, time.Second, discardLogger(), func() TransportStats { return cur })
+	s := NewSampler(reg, time.Second, discardLogger(), Sources{Transport: func() TransportStats { return cur }})
 	now := time.Unix(1700000000, 0)
 	_ = s.sampleAt(now)
 	reg.PayloadSent.Add(100)
@@ -186,7 +197,7 @@ func TestSamplerHandlesCounterReset(t *testing.T) {
 	reg := &Registry{}
 	reg.PayloadSent.Add(1000)
 	cur := TransportStats{UDPBytesSent: 5000, OutSegs: 100, RetransSegs: 5}
-	s := NewSampler(reg, time.Second, discardLogger(), func() TransportStats { return cur })
+	s := NewSampler(reg, time.Second, discardLogger(), Sources{Transport: func() TransportStats { return cur }})
 	now := time.Unix(1700000000, 0)
 	_ = s.sampleAt(now)
 
@@ -201,7 +212,7 @@ func TestSamplerHandlesCounterReset(t *testing.T) {
 
 func TestSamplerRetransRateWithoutOutSegs(t *testing.T) {
 	reg := &Registry{}
-	s := NewSampler(reg, time.Second, discardLogger(), func() TransportStats { return TransportStats{} })
+	s := NewSampler(reg, time.Second, discardLogger(), Sources{})
 	now := time.Unix(1700000000, 0)
 	_ = s.sampleAt(now)
 	smp := s.sampleAt(now.Add(time.Second))
@@ -217,8 +228,9 @@ func TestSamplerRunLogsAndStops(t *testing.T) {
 
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	s := NewSampler(reg, 20*time.Millisecond, logger, func() TransportStats {
-		return TransportStats{UDPBytesSent: 1024, OutSegs: 10}
+	s := NewSampler(reg, 20*time.Millisecond, logger, Sources{
+		Transport: func() TransportStats { return TransportStats{UDPBytesSent: 1024, OutSegs: 10} },
+		Pool:      func() PoolStats { return PoolStats{Sessions: 2, InUse: 1, Idle: 1, Waiters: 3, Rebuilds: 7} },
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -246,7 +258,9 @@ func TestSamplerRunLogsAndStops(t *testing.T) {
 	if !strings.Contains(out, "event=metrics") {
 		t.Fatalf("未见统计日志: %s", out)
 	}
-	for _, want := range []string{"sessions=2", "streams=5", "payload_sent=", "wire_sent=", "retrans=", "payload_recv_total=", "wire_recv_total=", "auth=0 session="} {
+	for _, want := range []string{"sessions=2", "streams=5", "payload_sent=", "wire_sent=", "retrans=",
+		"payload_recv_total=", "wire_recv_total=", "fec_recovered=", "fec_errs=",
+		"pool_in_use=1", "pool_idle=1", "pool_waiters=3", "pool_rebuilds=7", "auth=0 session="} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("日志缺少 %q: %s", want, out)
 		}
@@ -254,7 +268,7 @@ func TestSamplerRunLogsAndStops(t *testing.T) {
 }
 
 func TestSamplerRunDisabled(t *testing.T) {
-	s := NewSampler(nil, 0, discardLogger(), nil)
+	s := NewSampler(nil, 0, discardLogger(), Sources{})
 	done := make(chan struct{})
 	go func() {
 		s.Run(context.Background())
