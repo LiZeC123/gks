@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/LiZeC123/gks/internal/log"
@@ -42,6 +43,11 @@ type Handler struct {
 	cfg    HandlerConfig
 	dialer Dialer
 	log    *slog.Logger
+
+	// routers 保证「一条会话只注册一个 CONNECT_RESP handler」，
+	// 回包再按 StreamID 路由到具体连接（会话被池复用后必须如此）。
+	routersMu sync.Mutex
+	routers   map[*mux.Session]*connRouter
 }
 
 // NewHandler 构造 Handler。
@@ -50,7 +56,39 @@ func NewHandler(cfg HandlerConfig, dialer Dialer) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{cfg: cfg, dialer: dialer, log: logger}
+	return &Handler{
+		cfg:     cfg,
+		dialer:  dialer,
+		log:     logger,
+		routers: make(map[*mux.Session]*connRouter),
+	}
+}
+
+// routerFor 返回（必要时创建）该会话的路由器，并保证只注册一次 handler。
+func (h *Handler) routerFor(sess *mux.Session) *connRouter {
+	h.routersMu.Lock()
+	defer h.routersMu.Unlock()
+	if r, ok := h.routers[sess]; ok {
+		return r
+	}
+	r := newConnRouter()
+	sess.Handle(protocol.TypeConnectResp, r.dispatch)
+	h.routers[sess] = r
+	return r
+}
+
+// forgetSession 清理某条会话的路由表（会话被丢弃/回收时调用）。
+func (h *Handler) forgetSession(sess *mux.Session) {
+	if sess == nil {
+		return
+	}
+	h.routersMu.Lock()
+	r := h.routers[sess]
+	delete(h.routers, sess)
+	h.routersMu.Unlock()
+	if r != nil {
+		r.close()
+	}
 }
 
 // Handle 处理一条本地 SOCKS5 连接。
@@ -90,6 +128,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	defer func() { _ = sess.Close() }()
+	defer h.forgetSession(sess)
 
 	stream, err := sess.OpenStream(ctx)
 	if err != nil {
@@ -165,24 +204,16 @@ func (h *Handler) dialSession(ctx context.Context) (*mux.Session, error) {
 	return sess, nil
 }
 
-// connectRemote 发送 CONNECT_REQ 并等待 CONNECT_RESP。
+// connectRemote 发送 CONNECT_REQ 并等待属于该流的 CONNECT_RESP。
 func (h *Handler) connectRemote(
 	ctx context.Context,
 	sess *mux.Session,
 	stream mux.Stream,
 	target Target,
 ) (protocol.ConnectResponse, error) {
-	respCh := make(chan protocol.ConnectResponse, 1)
-	sess.Handle(protocol.TypeConnectResp, func(_ *mux.Session, f protocol.Frame) {
-		resp, err := protocol.ParseConnectResponse(f.Payload)
-		if err != nil {
-			return
-		}
-		select {
-		case respCh <- resp:
-		default:
-		}
-	})
+	router := h.routerFor(sess)
+	respCh := router.register(stream.StreamID())
+	defer router.unregister(stream.StreamID())
 
 	payload, err := protocol.ConnectRequest{Address: target}.Marshal()
 	if err != nil {
@@ -195,8 +226,11 @@ func (h *Handler) connectRemote(
 	timer := time.NewTimer(h.cfg.ConnectTimeout)
 	defer timer.Stop()
 	select {
-	case resp := <-respCh:
-		return resp, nil
+	case res := <-respCh:
+		if res.err != nil {
+			return protocol.ConnectResponse{}, res.err
+		}
+		return res.resp, nil
 	case <-timer.C:
 		return protocol.ConnectResponse{Reply: protocol.RepTTLExpired, Bind: protocol.UnspecificBind()}, nil
 	case <-sess.Done():
