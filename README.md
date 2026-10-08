@@ -19,7 +19,7 @@ gks/
 │   ├── protocol/       # 帧编解码、AEAD/HKDF/nonce、AUTH 握手与重放缓存
 │   ├── mux/            # Mux/Stream 接口 + Session（读循环/单写循环/心跳）
 │   ├── transport/      # KCP 拨号与监听（传输层加密开关）
-│   ├── config/         # 单文件分段配置 + 严格校验
+│   ├── config/         # 三段式配置（common/client/server）+ 严格校验
 │   └── log/            # slog 封装与字段规范
 └── test/
     └── gks.yaml.example
@@ -54,13 +54,20 @@ cp test/gks.yaml.example /tmp/gks.yaml
 
 ## 配置
 
-- **单个 YAML 文件**，顶层 `client:` / `server:` 两段；两个程序 `-c` 同一文件。
-- **严格模式**：出现未知字段直接启动失败。
-- `psk` 必须是 base64 编码的 32 字节；两端一致，且不能是全 0 占位值。
-- `crypt`（传输层）与 `aead`（应用层）两端必须一致：
-  - `aead`：`chacha20-poly1305`（默认）或 `aes-256-gcm`。
-  - `crypt`：`none`（默认，阶段 B）或 `aes-128-gcm` 等（阶段 A，见 dev.md §0.3）。
+配置是**单个 YAML 文件，分三段**；两个程序 `-c` 同一文件，各取所需段落：
+
+| 段 | 内容 | 为什么这样分 |
+| --- | --- | --- |
+| `common` | `psk`、`crypt`、`aead`、`kcp`（interval/mtu/window/FEC）、`stream.idle_timeout`、`limits`（流数上限、帧体上限、单帧 Payload 上限） | **两端必须一致**，只写一次就不存在写岔的可能 |
+| `client` | `listen`、本地 SOCKS5 认证、连接池、服务端地址、心跳、日志级别 | 仅客户端使用 |
+| `server` | `listen`、认证窗口与重放缓存、拨号超时、日志级别 | 仅服务端使用 |
+
+- **严格模式**：出现未知字段直接启动失败；把 `common` 里的字段写进 `client`/`server` 同样会报错——这正是防止两处不一致的手段（有单测守着）。
+- `common.psk` 必须是 base64 编码的 32 字节，且不能是全 0 占位值。
+- `common.aead`：`chacha20-poly1305`（默认）或 `aes-256-gcm`。
+- `common.crypt`：`none`（默认，阶段 B）或 `aes-128-gcm` 等（阶段 A，见 dev.md §0.3）。
 - `client.auth.mode` 目前只支持 `none`；`userpass` 尚未实现（配置中出现会直接报错）。
+- 校验用 `errors.Join`，会**一次性报出** `common` 与该端段落里的所有问题。
 
 ## 测试
 

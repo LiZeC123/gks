@@ -1,78 +1,73 @@
 # gks 示例配置（dev.md §7.2）
 #
+# 三段式：
+#   common: 两端必须一致的参数（PSK、加密算法、KCP 调参、流与帧上限）—— 只写一次
+#   client: 仅客户端使用的参数
+#   server: 仅服务端使用的参数
+#
 # 两个程序读同一个文件，各取自己需要的段落：
 #   ./bin/server -c gks.yaml
 #   ./bin/client -c gks.yaml
 #
 # 注意：
-#   1. psk 必须是 base64 编码的 32 字节密钥，两端必须一致。
+#   1. common.psk 是 base64 编码的 32 字节密钥，两端共用同一份，不存在写岔的可能。
 #      生成：openssl rand -base64 32
-#      下面这个是示例占位值（0x00..0x1f），上线前必须替换。
-#   2. crypt / aead 两端必须一致。
-#   3. 未知字段会导致启动失败（严格模式）。
+#      下面是示例占位值（0x00..0x1f），上线前必须替换。
+#   2. common.crypt / common.aead 同理，两端天然一致。
+#   3. 未知字段会导致启动失败（严格模式）；把 common 的字段写进 client/server 也会报错。
+
+common:
+  psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+  crypt: "none"                      # none | aes-128-gcm（阶段 A 推荐）| aes-256-gcm | aes-128 | aes-256 | salsa20
+  aead: "chacha20-poly1305"          # chacha20-poly1305 | aes-256-gcm
+  kcp:
+    interval: 10ms                   # 刷新间隔
+    mtu: 1350                        # 避免 IP 分片
+    sndwnd: 256                      # 发送窗口
+    rcvwnd: 256                      # 接收窗口
+    data_shards: 0                   # FEC，0 = 关闭
+    parity_shards: 0
+  stream:
+    idle_timeout: 600s               # 流长时间无数据则 RST
+  limits:
+    max_streams_per_session: 256     # 客户端开流上限 = 服务端接受上限
+    max_frame_body: 65536            # 超过即断开（防伪造长度挂起）
+    max_data_payload: 16384          # 发送方据此拆帧
 
 client:
-  listen: "127.0.0.1:1080"          # 本地 SOCKS5 TCP 监听
+  listen: "127.0.0.1:1080"           # 本地 SOCKS5 TCP 监听
   auth:
     mode: "none"                     # none | userpass(TODO，当前未实现)
     users: []
   socks5:
     handshake_timeout: 10s
   pool:
-    size: 2
-    max_sessions: 8
-    max_streams_per_session: 256
-    idle_timeout: 300s
-    startup_jitter: 300ms
-    connect_timeout: 5s
-    backoff_min: 500ms
-    backoff_max: 30s
+    size: 2                          # 初始/保底 Session 数
+    max_sessions: 8                  # Session 数硬上限
+    idle_timeout: 300s               # 空闲 Session 回收
+    startup_jitter: 300ms            # 启动错峰：相邻 Session 建立间隔随机
+    connect_timeout: 5s              # 等待可用 Session 的上限
+    backoff_min: 500ms               # 重建指数退避下限
+    backoff_max: 30s                 # 重建指数退避上限
   kcp:
-    server: "127.0.0.1:4000"
-    psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
-    crypt: "none"                    # none | aes-128-gcm | aes-256-gcm | aes-128 | aes-256 | salsa20
-    aead: "chacha20-poly1305"        # chacha20-poly1305 | aes-256-gcm
-    interval: 10ms
-    mtu: 1350
-    sndwnd: 256
-    rcvwnd: 256
-    data_shards: 0
-    parity_shards: 0
-    heartbeat_interval: 20s
-    heartbeat_miss: 3
-    auth_timeout: 5s
-  stream:
-    idle_timeout: 600s
+    server: "127.0.0.1:4000"         # 服务端 KCP/UDP 地址
+    heartbeat_interval: 20s          # 实际在 15s~25s 间抖动
+    heartbeat_miss: 3                # 连续未收到 PONG 的次数上限
+    auth_timeout: 5s                 # 等待 AUTH_RESP
   shutdown_grace: 30s
   log:
-    level: "info"
+    level: "info"                    # debug | info | warn | error
 
 server:
   listen: "127.0.0.1:4000"           # KCP/UDP 监听
-  psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
-  crypt: "none"
-  aead: "chacha20-poly1305"
   auth:
-    timestamp_window: 60s
-    auth_timeout: 5s
-    replay_cache_size: 65536
-    max_pending_sessions: 1024
-  kcp:
-    interval: 10ms
-    mtu: 1350
-    sndwnd: 256
-    rcvwnd: 256
-    data_shards: 0
-    parity_shards: 0
+    timestamp_window: 60s            # 允许的时钟偏差/重放窗口
+    auth_timeout: 5s                 # 等待 AUTH_REQ
+    replay_cache_size: 65536         # nonce 重放缓存条目上限
+    max_pending_sessions: 1024       # 未认证 Session 并发上限
   dial:
     timeout: 10s
     keepalive: 30s
-  stream:
-    idle_timeout: 600s
-  limits:
-    max_streams_per_session: 256
-    max_frame_body: 65536
-    max_data_payload: 16384
   shutdown_grace: 30s
   log:
     level: "info"

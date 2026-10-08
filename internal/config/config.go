@@ -1,7 +1,14 @@
 // Package config 负责加载与校验 gks 的配置文件（dev.md §7）。
 //
-// 形态：单个 YAML 文件，顶层分为 client: 与 server: 两段，
-// 两个程序各自 -c 同一文件，各取所需段落。解析使用严格模式（未知字段即报错）。
+// 形态：单个 YAML 文件，顶层分为三段：
+//
+//	common: 两端必须一致的参数（PSK、加密算法、KCP 调参、流与帧上限）——只写一次
+//	client: 仅客户端使用的参数
+//	server: 仅服务端使用的参数
+//
+// 两个程序各自 -c 同一文件，各取所需段落。把「必须一致」的字段集中在 common，
+// 是为了从结构上消除两端各写一份导致的不一致（psk/crypt/aead/窗口/帧上限等）。
+// 解析使用严格模式：出现未知字段即报错。
 package config
 
 import (
@@ -43,20 +50,71 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 
 // Config 是整个配置文件。
 type Config struct {
+	Common Common `yaml:"common"`
 	Client Client `yaml:"client"`
 	Server Server `yaml:"server"`
 }
 
-// Client 是 client: 段。
+// Common 是两端必须保持一致的参数。
+//
+// 这些字段一旦两端不一致，轻则行为诡异（窗口/MTU 不匹配），重则直接不可用
+// （PSK/crypt/aead 不一致会导致握手或解密失败），因此只在 common 段写一次。
+type Common struct {
+	// PSK 是 base64 编码的 32 字节预共享密钥。
+	PSK   string `yaml:"psk"`
+	Crypt string `yaml:"crypt"`
+	AEAD  string `yaml:"aead"`
+	// KCP 是两端的 KCP 调参。
+	KCP KCPTuning `yaml:"kcp"`
+	// Stream 是流级策略（两端对「流空闲多久算死」的口径一致）。
+	Stream Stream `yaml:"stream"`
+	// Limits 是帧与流的上限：发送方必须遵守，接收方据此校验。
+	Limits Limits `yaml:"limits"`
+}
+
+// KCPTuning 是两端共用的 KCP 调参。
+type KCPTuning struct {
+	Interval     Duration `yaml:"interval"`
+	MTU          int      `yaml:"mtu"`
+	SndWnd       int      `yaml:"sndwnd"`
+	RcvWnd       int      `yaml:"rcvwnd"`
+	DataShards   int      `yaml:"data_shards"`
+	ParityShards int      `yaml:"parity_shards"`
+}
+
+// Stream 是流级策略。
+type Stream struct {
+	IdleTimeout Duration `yaml:"idle_timeout"`
+}
+
+// Limits 是单会话的上限。
+type Limits struct {
+	// MaxStreamsPerSession 既是客户端单会话的开流上限，也是服务端的接受上限。
+	MaxStreamsPerSession int `yaml:"max_streams_per_session"`
+	// MaxFrameBody 是单帧帧体上限，超过即断开（防伪造长度挂起）。
+	MaxFrameBody int `yaml:"max_frame_body"`
+	// MaxDataPayload 是单个 DATA 帧的 Payload 上限，发送方据此拆帧。
+	MaxDataPayload int `yaml:"max_data_payload"`
+}
+
+// Client 是 client: 段（只放客户端独有的参数）。
 type Client struct {
 	Listen        string     `yaml:"listen"`
 	Auth          ClientAuth `yaml:"auth"`
 	Socks5        Socks5     `yaml:"socks5"`
 	Pool          Pool       `yaml:"pool"`
 	KCP           ClientKCP  `yaml:"kcp"`
-	Stream        Stream     `yaml:"stream"`
 	ShutdownGrace Duration   `yaml:"shutdown_grace"`
 	Log           Log        `yaml:"log"`
+}
+
+// ClientKCP 是客户端侧的连接与保活参数（KCP 调参在 common.kcp）。
+type ClientKCP struct {
+	// Server 是服务端的 KCP/UDP 地址。
+	Server            string   `yaml:"server"`
+	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	HeartbeatMiss     int      `yaml:"heartbeat_miss"`
+	AuthTimeout       Duration `yaml:"auth_timeout"`
 }
 
 // ClientAuth 是本地 SOCKS5 的认证设置。本版仅支持 none。
@@ -78,59 +136,20 @@ type Socks5 struct {
 
 // Pool 是 KCP Session 池设置。
 type Pool struct {
-	Size                 int      `yaml:"size"`
-	MaxSessions          int      `yaml:"max_sessions"`
-	MaxStreamsPerSession int      `yaml:"max_streams_per_session"`
-	IdleTimeout          Duration `yaml:"idle_timeout"`
-	StartupJitter        Duration `yaml:"startup_jitter"`
-	ConnectTimeout       Duration `yaml:"connect_timeout"`
-	BackoffMin           Duration `yaml:"backoff_min"`
-	BackoffMax           Duration `yaml:"backoff_max"`
+	Size           int      `yaml:"size"`
+	MaxSessions    int      `yaml:"max_sessions"`
+	IdleTimeout    Duration `yaml:"idle_timeout"`
+	StartupJitter  Duration `yaml:"startup_jitter"`
+	ConnectTimeout Duration `yaml:"connect_timeout"`
+	BackoffMin     Duration `yaml:"backoff_min"`
+	BackoffMax     Duration `yaml:"backoff_max"`
 }
 
-// KCPTuning 是两端共用的 KCP 调参。
-type KCPTuning struct {
-	Interval     Duration `yaml:"interval"`
-	MTU          int      `yaml:"mtu"`
-	SndWnd       int      `yaml:"sndwnd"`
-	RcvWnd       int      `yaml:"rcvwnd"`
-	DataShards   int      `yaml:"data_shards"`
-	ParityShards int      `yaml:"parity_shards"`
-}
-
-// ClientKCP 是 client 侧的 KCP 与认证设置。
-type ClientKCP struct {
-	KCPTuning         `yaml:",inline"`
-	Server            string   `yaml:"server"`
-	PSK               string   `yaml:"psk"`
-	Crypt             string   `yaml:"crypt"`
-	AEAD              string   `yaml:"aead"`
-	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
-	HeartbeatMiss     int      `yaml:"heartbeat_miss"`
-	AuthTimeout       Duration `yaml:"auth_timeout"`
-}
-
-// Stream 是流级设置。
-type Stream struct {
-	IdleTimeout Duration `yaml:"idle_timeout"`
-}
-
-// Log 是日志设置。
-type Log struct {
-	Level string `yaml:"level"`
-}
-
-// Server 是 server: 段。
+// Server 是 server: 段（只放服务端独有的参数）。
 type Server struct {
 	Listen        string     `yaml:"listen"`
-	PSK           string     `yaml:"psk"`
-	Crypt         string     `yaml:"crypt"`
-	AEAD          string     `yaml:"aead"`
 	Auth          ServerAuth `yaml:"auth"`
-	KCP           KCPTuning  `yaml:"kcp"`
 	Dial          Dial       `yaml:"dial"`
-	Stream        Stream     `yaml:"stream"`
-	Limits        Limits     `yaml:"limits"`
 	ShutdownGrace Duration   `yaml:"shutdown_grace"`
 	Log           Log        `yaml:"log"`
 }
@@ -149,11 +168,9 @@ type Dial struct {
 	Keepalive Duration `yaml:"keepalive"`
 }
 
-// Limits 是服务端限额。
-type Limits struct {
-	MaxStreamsPerSession int `yaml:"max_streams_per_session"`
-	MaxFrameBody         int `yaml:"max_frame_body"`
-	MaxDataPayload       int `yaml:"max_data_payload"`
+// Log 是日志设置（两端可各自设置级别）。
+type Log struct {
+	Level string `yaml:"level"`
 }
 
 // 取值范围常量（dev.md §7.3）。
@@ -192,6 +209,16 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// ValidateClient 校验 common 段与 client 段（客户端启动时调用）。
+func (c *Config) ValidateClient() error {
+	return errors.Join(c.Common.Validate(), c.Client.Validate())
+}
+
+// ValidateServer 校验 common 段与 server 段（服务端启动时调用）。
+func (c *Config) ValidateServer() error {
+	return errors.Join(c.Common.Validate(), c.Server.Validate())
+}
+
 // problems 收集校验问题，最后用 errors.Join 一次性返回，便于一次改完所有错。
 type problems struct {
 	errs []error
@@ -209,15 +236,35 @@ func (p *problems) require(cond bool, format string, args ...any) {
 
 func (p *problems) err() error { return errors.Join(p.errs...) }
 
+// Validate 校验 common: 段。
+func (c *Common) Validate() error {
+	p := &problems{}
+	decodePSK(p, "common.psk", c.PSK)
+	validateCrypt(p, "common.crypt", c.Crypt)
+	validateAEAD(p, "common.aead", c.AEAD)
+	validateKCPTuning(p, "common.kcp", &c.KCP)
+
+	p.require(c.Stream.IdleTimeout.D() > 0, "common.stream.idle_timeout: 必须大于 0")
+
+	p.require(c.Limits.MaxStreamsPerSession >= 1 && c.Limits.MaxStreamsPerSession <= MaxStreamsPerSess,
+		"common.limits.max_streams_per_session: 需在 [1,%d]，实际 %d", MaxStreamsPerSess, c.Limits.MaxStreamsPerSession)
+	p.require(c.Limits.MaxFrameBody > 0 && c.Limits.MaxFrameBody <= protocol.MaxFrameBody,
+		"common.limits.max_frame_body: 需在 (0,%d]，实际 %d", protocol.MaxFrameBody, c.Limits.MaxFrameBody)
+	minBody := protocol.BodyPrefixSize + protocol.TagSize
+	p.require(c.Limits.MaxFrameBody > minBody,
+		"common.limits.max_frame_body: 必须大于 %d，实际 %d", minBody, c.Limits.MaxFrameBody)
+	p.require(c.Limits.MaxDataPayload >= 1, "common.limits.max_data_payload: 必须不小于 1")
+	p.require(c.Limits.MaxDataPayload <= c.Limits.MaxFrameBody-minBody,
+		"common.limits.max_data_payload: 不能超过 max_frame_body-%d（%d > %d）",
+		minBody, c.Limits.MaxDataPayload, c.Limits.MaxFrameBody-minBody)
+	return p.err()
+}
+
 // Validate 校验 client: 段。
 func (c *Client) Validate() error {
 	p := &problems{}
 	validateAddr(p, "client.listen", c.Listen, false)
 	validateAddr(p, "client.kcp.server", c.KCP.Server, true)
-	validateKCPTuning(p, "client.kcp", &c.KCP.KCPTuning)
-	validateCrypt(p, "client.kcp.crypt", c.KCP.Crypt)
-	validateAEAD(p, "client.kcp.aead", c.KCP.AEAD)
-	decodePSK(p, "client.kcp.psk", c.KCP.PSK)
 
 	p.require(c.Auth.Mode == LocalAuthNone || c.Auth.Mode == LocalAuthUserPass,
 		"client.auth.mode: 只能是 %q 或 %q，实际 %q", LocalAuthNone, LocalAuthUserPass, c.Auth.Mode)
@@ -225,7 +272,6 @@ func (c *Client) Validate() error {
 		p.add("client.auth.mode: userpass 认证尚未实现（见 dev.md §16.1）")
 	}
 	p.require(len(c.Auth.Users) == 0, "client.auth.users: userpass 尚未实现，必须为空")
-	p.require(c.Auth.Mode != "" || len(c.Auth.Users) == 0, "client.auth.users: userpass 尚未实现，必须为空")
 
 	p.require(c.Socks5.HandshakeTimeout.D() > 0, "client.socks5.handshake_timeout: 必须大于 0")
 	p.require(c.Pool.Size >= MinPoolSize && c.Pool.Size <= MaxPoolSize,
@@ -234,8 +280,6 @@ func (c *Client) Validate() error {
 		"client.pool.max_sessions: 需在 [%d,%d]，实际 %d", MinPoolSize, MaxPoolSessions, c.Pool.MaxSessions)
 	p.require(c.Pool.MaxSessions >= c.Pool.Size,
 		"client.pool.max_sessions: 必须不小于 pool.size（%d < %d）", c.Pool.MaxSessions, c.Pool.Size)
-	p.require(c.Pool.MaxStreamsPerSession >= 1 && c.Pool.MaxStreamsPerSession <= MaxStreamsPerSess,
-		"client.pool.max_streams_per_session: 需在 [1,%d]，实际 %d", MaxStreamsPerSess, c.Pool.MaxStreamsPerSession)
 	p.require(c.Pool.IdleTimeout.D() > 0, "client.pool.idle_timeout: 必须大于 0")
 	p.require(c.Pool.StartupJitter.D() >= 0, "client.pool.startup_jitter: 不能为负")
 	p.require(c.Pool.ConnectTimeout.D() > 0, "client.pool.connect_timeout: 必须大于 0")
@@ -247,7 +291,6 @@ func (c *Client) Validate() error {
 	p.require(c.KCP.HeartbeatMiss >= 1, "client.kcp.heartbeat_miss: 必须不小于 1")
 	p.require(c.KCP.AuthTimeout.D() > 0, "client.kcp.auth_timeout: 必须大于 0")
 
-	p.require(c.Stream.IdleTimeout.D() > 0, "client.stream.idle_timeout: 必须大于 0")
 	p.require(c.ShutdownGrace.D() > 0, "client.shutdown_grace: 必须大于 0")
 	validateLevel(p, "client.log.level", c.Log.Level)
 	return p.err()
@@ -257,10 +300,6 @@ func (c *Client) Validate() error {
 func (s *Server) Validate() error {
 	p := &problems{}
 	validateAddr(p, "server.listen", s.Listen, false)
-	validateKCPTuning(p, "server.kcp", &s.KCP)
-	validateCrypt(p, "server.crypt", s.Crypt)
-	validateAEAD(p, "server.aead", s.AEAD)
-	decodePSK(p, "server.psk", s.PSK)
 
 	p.require(s.Auth.TimestampWindow.D() > 0, "server.auth.timestamp_window: 必须大于 0")
 	p.require(s.Auth.AuthTimeout.D() > 0, "server.auth.auth_timeout: 必须大于 0")
@@ -269,56 +308,28 @@ func (s *Server) Validate() error {
 
 	p.require(s.Dial.Timeout.D() > 0, "server.dial.timeout: 必须大于 0")
 	p.require(s.Dial.Keepalive.D() > 0, "server.dial.keepalive: 必须大于 0")
-	p.require(s.Stream.IdleTimeout.D() > 0, "server.stream.idle_timeout: 必须大于 0")
-
-	p.require(s.Limits.MaxStreamsPerSession >= 1 && s.Limits.MaxStreamsPerSession <= MaxStreamsPerSess,
-		"server.limits.max_streams_per_session: 需在 [1,%d]，实际 %d", MaxStreamsPerSess, s.Limits.MaxStreamsPerSession)
-	p.require(s.Limits.MaxFrameBody > 0 && s.Limits.MaxFrameBody <= protocol.MaxFrameBody,
-		"server.limits.max_frame_body: 需在 (0,%d]，实际 %d", protocol.MaxFrameBody, s.Limits.MaxFrameBody)
-	minBody := protocol.BodyPrefixSize + protocol.TagSize
-	p.require(s.Limits.MaxFrameBody > minBody,
-		"server.limits.max_frame_body: 必须大于 %d，实际 %d", minBody, s.Limits.MaxFrameBody)
-	p.require(s.Limits.MaxDataPayload >= 1, "server.limits.max_data_payload: 必须不小于 1")
-	p.require(s.Limits.MaxDataPayload <= s.Limits.MaxFrameBody-minBody,
-		"server.limits.max_data_payload: 不能超过 max_frame_body-%d（%d > %d）",
-		minBody, s.Limits.MaxDataPayload, s.Limits.MaxFrameBody-minBody)
 
 	p.require(s.ShutdownGrace.D() > 0, "server.shutdown_grace: 必须大于 0")
 	validateLevel(p, "server.log.level", s.Log.Level)
 	return p.err()
 }
 
-// PSKBytes 返回 client 侧解码后的 PSK。
-func (c *Client) PSKBytes() ([]byte, error) {
-	psk, err := decodeBase64PSK(c.KCP.PSK)
+// PSKBytes 返回解码后的 PSK。
+func (c *Common) PSKBytes() ([]byte, error) {
+	psk, err := decodeBase64PSK(c.PSK)
 	if err != nil {
-		return nil, fmt.Errorf("client.kcp.psk: %w", err)
-	}
-	return psk, nil
-}
-
-// PSKBytes 返回 server 侧解码后的 PSK。
-func (s *Server) PSKBytes() ([]byte, error) {
-	psk, err := decodeBase64PSK(s.PSK)
-	if err != nil {
-		return nil, fmt.Errorf("server.psk: %w", err)
+		return nil, fmt.Errorf("common.psk: %w", err)
 	}
 	return psk, nil
 }
 
 // CryptName 返回规范化后的传输层加密算法名（空值即 none）。
-func (c *Client) CryptName() string { return normalizeCrypt(c.KCP.Crypt) }
-
-// CryptName 返回规范化后的传输层加密算法名（空值即 none）。
-func (s *Server) CryptName() string { return normalizeCrypt(s.Crypt) }
+func (c *Common) CryptName() string { return normalizeCrypt(c.Crypt) }
 
 // AEADName 返回规范化后的应用层 AEAD 算法名。
-func (c *Client) AEADName() string { return normalizeAEAD(c.KCP.AEAD) }
+func (c *Common) AEADName() string { return normalizeAEAD(c.AEAD) }
 
-// AEADName 返回规范化后的应用层 AEAD 算法名。
-func (s *Server) AEADName() string { return normalizeAEAD(s.AEAD) }
-
-// Level 返回规范化后的日志级别（空值即 info）。
+// LevelOrDefault 返回规范化后的日志级别（空值即 info）。
 func (l Log) LevelOrDefault() string {
 	if l.Level == "" {
 		return "info"

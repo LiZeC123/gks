@@ -48,7 +48,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Client.Validate(); err != nil {
+	if err := cfg.ValidateClient(); err != nil {
 		return fmt.Errorf("配置校验失败:\n%w", err)
 	}
 
@@ -56,7 +56,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	psk, err := cfg.Client.PSKBytes()
+	psk, err := cfg.Common.PSKBytes()
 	if err != nil {
 		return err
 	}
@@ -65,13 +65,13 @@ func run() error {
 	defer stop()
 
 	dialer := transport.NewDialer(transport.Options{
-		Interval:     cfg.Client.KCP.Interval.D(),
-		MTU:          cfg.Client.KCP.MTU,
-		SndWnd:       cfg.Client.KCP.SndWnd,
-		RcvWnd:       cfg.Client.KCP.RcvWnd,
-		DataShards:   cfg.Client.KCP.DataShards,
-		ParityShards: cfg.Client.KCP.ParityShards,
-		Crypt:        cfg.Client.CryptName(),
+		Interval:     cfg.Common.KCP.Interval.D(),
+		MTU:          cfg.Common.KCP.MTU,
+		SndWnd:       cfg.Common.KCP.SndWnd,
+		RcvWnd:       cfg.Common.KCP.RcvWnd,
+		DataShards:   cfg.Common.KCP.DataShards,
+		ParityShards: cfg.Common.KCP.ParityShards,
+		Crypt:        cfg.Common.CryptName(),
 		PSK:          psk,
 	})
 	conn, err := dialer.Dial(cfg.Client.KCP.Server)
@@ -81,7 +81,7 @@ func run() error {
 
 	sess, err := mux.DialSession(ctx, conn, mux.Options{
 		PSK:               psk,
-		AEAD:              cfg.Client.AEADName(),
+		AEAD:              cfg.Common.AEADName(),
 		AuthTimeout:       cfg.Client.KCP.AuthTimeout.D(),
 		HeartbeatInterval: cfg.Client.KCP.HeartbeatInterval.D(),
 		HeartbeatMiss:     cfg.Client.KCP.HeartbeatMiss,

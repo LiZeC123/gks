@@ -43,7 +43,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Server.Validate(); err != nil {
+	if err := cfg.ValidateServer(); err != nil {
 		return fmt.Errorf("配置校验失败:\n%w", err)
 	}
 
@@ -51,7 +51,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	psk, err := cfg.Server.PSKBytes()
+	psk, err := cfg.Common.PSKBytes()
 	if err != nil {
 		return err
 	}
@@ -64,13 +64,13 @@ func run() error {
 	}
 
 	tln, err := transport.Listen(cfg.Server.Listen, transport.Options{
-		Interval:     cfg.Server.KCP.Interval.D(),
-		MTU:          cfg.Server.KCP.MTU,
-		SndWnd:       cfg.Server.KCP.SndWnd,
-		RcvWnd:       cfg.Server.KCP.RcvWnd,
-		DataShards:   cfg.Server.KCP.DataShards,
-		ParityShards: cfg.Server.KCP.ParityShards,
-		Crypt:        cfg.Server.CryptName(),
+		Interval:     cfg.Common.KCP.Interval.D(),
+		MTU:          cfg.Common.KCP.MTU,
+		SndWnd:       cfg.Common.KCP.SndWnd,
+		RcvWnd:       cfg.Common.KCP.RcvWnd,
+		DataShards:   cfg.Common.KCP.DataShards,
+		ParityShards: cfg.Common.KCP.ParityShards,
+		Crypt:        cfg.Common.CryptName(),
 		PSK:          psk,
 	})
 	if err != nil {
@@ -81,14 +81,14 @@ func run() error {
 	logger.Info("gks 服务端已启动",
 		log.Event, "server_start",
 		"listen", tln.Addr().String(),
-		"crypt", cfg.Server.CryptName(),
-		"aead", cfg.Server.AEADName(),
+		"crypt", cfg.Common.CryptName(),
+		"aead", cfg.Common.AEADName(),
 	)
 
 	// 服务端不发心跳（配置中没有该字段），只负责响应 PING；客户端负责保活。
 	opts := mux.Options{
 		PSK:             psk,
-		AEAD:            cfg.Server.AEADName(),
+		AEAD:            cfg.Common.AEADName(),
 		AuthTimeout:     cfg.Server.Auth.AuthTimeout.D(),
 		TimestampWindow: cfg.Server.Auth.TimestampWindow.D(),
 		ReplayCache:     replay,
