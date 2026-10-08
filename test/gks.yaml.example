@@ -1,0 +1,78 @@
+# gks 示例配置（dev.md §7.2）
+#
+# 两个程序读同一个文件，各取自己需要的段落：
+#   ./bin/server -c gks.yaml
+#   ./bin/client -c gks.yaml
+#
+# 注意：
+#   1. psk 必须是 base64 编码的 32 字节密钥，两端必须一致。
+#      生成：openssl rand -base64 32
+#      下面这个是示例占位值（0x00..0x1f），上线前必须替换。
+#   2. crypt / aead 两端必须一致。
+#   3. 未知字段会导致启动失败（严格模式）。
+
+client:
+  listen: "127.0.0.1:1080"          # 本地 SOCKS5 TCP 监听
+  auth:
+    mode: "none"                     # none | userpass(TODO，当前未实现)
+    users: []
+  socks5:
+    handshake_timeout: 10s
+  pool:
+    size: 2
+    max_sessions: 8
+    max_streams_per_session: 256
+    idle_timeout: 300s
+    startup_jitter: 300ms
+    connect_timeout: 5s
+    backoff_min: 500ms
+    backoff_max: 30s
+  kcp:
+    server: "127.0.0.1:4000"
+    psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    crypt: "none"                    # none | aes-128-gcm | aes-256-gcm | aes-128 | aes-256 | salsa20
+    aead: "chacha20-poly1305"        # chacha20-poly1305 | aes-256-gcm
+    interval: 10ms
+    mtu: 1350
+    sndwnd: 256
+    rcvwnd: 256
+    data_shards: 0
+    parity_shards: 0
+    heartbeat_interval: 20s
+    heartbeat_miss: 3
+    auth_timeout: 5s
+  stream:
+    idle_timeout: 600s
+  shutdown_grace: 30s
+  log:
+    level: "info"
+
+server:
+  listen: "127.0.0.1:4000"           # KCP/UDP 监听
+  psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+  crypt: "none"
+  aead: "chacha20-poly1305"
+  auth:
+    timestamp_window: 60s
+    auth_timeout: 5s
+    replay_cache_size: 65536
+    max_pending_sessions: 1024
+  kcp:
+    interval: 10ms
+    mtu: 1350
+    sndwnd: 256
+    rcvwnd: 256
+    data_shards: 0
+    parity_shards: 0
+  dial:
+    timeout: 10s
+    keepalive: 30s
+  stream:
+    idle_timeout: 600s
+  limits:
+    max_streams_per_session: 256
+    max_frame_body: 65536
+    max_data_payload: 16384
+  shutdown_grace: 30s
+  log:
+    level: "info"

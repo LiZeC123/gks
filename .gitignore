@@ -1,0 +1,11 @@
+# 构建产物
+/bin/
+
+# 测试与覆盖率产物
+*.test
+*.out
+coverage.html
+
+# 本地配置文件（可能含真实 PSK，不要提交）
+gks.yaml
+*.local.yaml
