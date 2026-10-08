@@ -21,6 +21,37 @@ type Dialer interface {
 	Dial(addr string) (net.Conn, error)
 }
 
+// SessionSource 提供已认证的会话。生产路径用 *SessionPool；
+// 单测可以传入任何实现（例如下面的 dialSessionSource）。
+type SessionSource interface {
+	Acquire(ctx context.Context) (*mux.Session, error)
+	Release(sess *mux.Session)
+	Discard(sess *mux.Session)
+}
+
+// dialSessionSource 是「每条连接新建一条会话」的退化实现（不池化）。
+type dialSessionSource struct {
+	dialer Dialer
+	opts   mux.Options
+	server string
+}
+
+func (s *dialSessionSource) Acquire(ctx context.Context) (*mux.Session, error) {
+	conn, err := s.dialer.Dial(s.server)
+	if err != nil {
+		return nil, fmt.Errorf("连接服务端 %s: %w", s.server, err)
+	}
+	sess, err := mux.DialSession(ctx, conn, s.opts)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("会话认证失败: %w", err)
+	}
+	return sess, nil
+}
+
+func (s *dialSessionSource) Release(sess *mux.Session) { _ = sess.Close() }
+func (s *dialSessionSource) Discard(sess *mux.Session) { _ = sess.Close() }
+
 // HandlerConfig 是 Handler 的运行参数（由 cmd 从配置装配）。
 type HandlerConfig struct {
 	// ServerAddr 是服务端的 KCP/UDP 地址。
@@ -33,6 +64,10 @@ type HandlerConfig struct {
 	ConnectTimeout time.Duration
 	// BridgeBuffer 为 0 时使用默认值。
 	BridgeBuffer int
+	// Sessions 是会话来源；为 nil 时退化为「每条连接新建一条会话」。
+	Sessions SessionSource
+	// MaxConnectAttempts 是「会话中途失效」时的换会话重试次数，默认 3。
+	MaxConnectAttempts int
 }
 
 // Handler 处理单条本地 SOCKS5 连接。
@@ -56,12 +91,23 @@ func NewHandler(cfg HandlerConfig, dialer Dialer) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{
+	h := &Handler{
 		cfg:     cfg,
 		dialer:  dialer,
 		log:     logger,
 		routers: make(map[*mux.Session]*connRouter),
 	}
+	if h.cfg.Sessions == nil {
+		h.cfg.Sessions = &dialSessionSource{dialer: dialer, opts: cfg.SessionOptions, server: cfg.ServerAddr}
+	}
+	if h.cfg.MaxConnectAttempts <= 0 {
+		h.cfg.MaxConnectAttempts = 3
+	}
+	// 池丢弃会话时同步清理路由表，避免按会话的资源泄漏。
+	if pool, ok := h.cfg.Sessions.(*SessionPool); ok {
+		pool.SetOnDrop(h.forgetSession)
+	}
+	return h
 }
 
 // routerFor 返回（必要时创建）该会话的路由器，并保证只注册一次 handler。
@@ -118,34 +164,18 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	sess, err := h.dialSession(ctx)
+	sess, stream, resp, err := h.dialAndConnect(ctx, target)
 	if err != nil {
 		metrics.Default.SessionDialFailures.Add(1)
 		_ = WriteReply(conn, protocol.RepHostUnreachable, protocol.UnspecificBind())
-		h.log.Warn("建立会话失败",
+		h.log.Warn("建立会话或发起 CONNECT 失败",
 			log.Event, "session_dial_failed", log.Remote, local,
 			log.Target, target.String(), "err", err)
 		return
 	}
-	defer func() { _ = sess.Close() }()
-	defer h.forgetSession(sess)
-
-	stream, err := sess.OpenStream(ctx)
-	if err != nil {
-		_ = WriteReply(conn, protocol.RepGeneralFailure, protocol.UnspecificBind())
-		h.log.Warn("开流失败", log.Event, "open_stream_failed", log.Remote, local, "err", err)
-		return
-	}
+	defer h.releaseSession(sess)
 	defer func() { _ = stream.Close() }()
 
-	resp, err := h.connectRemote(ctx, sess, stream, target)
-	if err != nil {
-		_ = WriteReply(conn, protocol.RepGeneralFailure, protocol.UnspecificBind())
-		h.log.Warn("CONNECT_REQ 失败",
-			log.Event, "connect_failed", log.Remote, local,
-			log.Target, target.String(), "err", err)
-		return
-	}
 	if resp.Reply != protocol.RepSuccess {
 		_ = WriteReply(conn, resp.Reply, protocol.UnspecificBind())
 		h.log.Warn("服务端拒绝连接",
@@ -190,18 +220,82 @@ func (h *Handler) socks5Handshake(conn net.Conn) (Target, error) {
 	return ReadRequest(conn)
 }
 
-// dialSession 建立到服务端的 KCP 会话并完成认证。
-func (h *Handler) dialSession(ctx context.Context) (*mux.Session, error) {
-	kconn, err := h.dialer.Dial(h.cfg.ServerAddr)
-	if err != nil {
-		return nil, fmt.Errorf("连接服务端 %s: %w", h.cfg.ServerAddr, err)
+// dialAndConnect 取会话 → 开流 → CONNECT_REQ/RESP。
+//
+// 只有当失败原因确实是「会话在过程中失效」时才换会话重试；服务端可能已经建好
+// 目标连接的失败（例如等待回包超时）不重试——重试会在服务端多建一条连接。
+func (h *Handler) dialAndConnect(
+	ctx context.Context,
+	target Target,
+) (*mux.Session, mux.Stream, protocol.ConnectResponse, error) {
+	var lastErr error
+	for attempt := 1; attempt <= h.cfg.MaxConnectAttempts; attempt++ {
+		sess, err := h.cfg.Sessions.Acquire(ctx)
+		if err != nil {
+			return nil, nil, protocol.ConnectResponse{}, err
+		}
+		stream, err := sess.OpenStream(ctx)
+		if err != nil {
+			h.discardSession(sess)
+			lastErr = err
+			continue
+		}
+		resp, err := h.connectRemote(ctx, sess, stream, target)
+		if err == nil {
+			return sess, stream, resp, nil
+		}
+		_ = stream.Close()
+		dead := h.isSessionDead(sess, err)
+		h.discardSession(sess)
+		if !dead {
+			return nil, nil, protocol.ConnectResponse{}, err
+		}
+		h.log.Warn("会话在连接过程中失效，换一条会话重试",
+			log.Event, "session_retry", "attempt", attempt, "err", err)
+		lastErr = err
 	}
-	sess, err := mux.DialSession(ctx, kconn, h.cfg.SessionOptions)
-	if err != nil {
-		_ = kconn.Close()
-		return nil, fmt.Errorf("会话认证失败: %w", err)
+	if lastErr == nil {
+		lastErr = mux.ErrSessionClosed
 	}
-	return sess, nil
+	return nil, nil, protocol.ConnectResponse{}, fmt.Errorf("重试 %d 次仍失败: %w", h.cfg.MaxConnectAttempts, lastErr)
+}
+
+// isSessionDead 判断错误是否意味着「这条会话已经不可用」。
+func (h *Handler) isSessionDead(sess *mux.Session, err error) bool {
+	select {
+	case <-sess.Done():
+		return true
+	default:
+	}
+	return errors.Is(err, ErrRouterClosed) ||
+		errors.Is(err, mux.ErrSessionClosed) ||
+		errors.Is(err, net.ErrClosed)
+}
+
+// releaseSession 归还会话：池化时交给池复用，否则关闭并清理路由表。
+func (h *Handler) releaseSession(sess *mux.Session) {
+	if sess == nil {
+		return
+	}
+	if pool, ok := h.cfg.Sessions.(*SessionPool); ok {
+		pool.Release(sess)
+		return
+	}
+	h.forgetSession(sess)
+	_ = sess.Close()
+}
+
+// discardSession 丢弃不可用的会话。
+func (h *Handler) discardSession(sess *mux.Session) {
+	if sess == nil {
+		return
+	}
+	if pool, ok := h.cfg.Sessions.(*SessionPool); ok {
+		pool.Discard(sess)
+		return
+	}
+	h.forgetSession(sess)
+	_ = sess.Close()
 }
 
 // connectRemote 发送 CONNECT_REQ 并等待属于该流的 CONNECT_RESP。

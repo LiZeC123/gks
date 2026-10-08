@@ -2,12 +2,14 @@
 
 基于 KCP 的 SOCKS5 代理系统。完整技术方案见上级目录的 [`dev.md`](../dev.md)。
 
-**当前进度：阶段 1 + 阶段 2 + 阶段 3 完成**（见 dev.md §8）。
+**当前进度：阶段 1 + 2 + 3 完成，阶段 5（连接池，保守形态）完成**（见 dev.md §8）。
 
 - 阶段 1：项目骨架、配置加载与校验、结构化日志、帧编解码（握手态/安全态）、AEAD/HKDF/nonce、AUTH 握手与防重放 —— 均有单测。
 - 阶段 2：KCP 上跑通 `AUTH_REQ/AUTH_RESP` → 安全态、PING/PONG 心跳（抖动间隔）、握手/心跳超时、拒绝明文降级。
 - 阶段 3：**可用的 SOCKS5 代理** —— 本地 SOCKS5 握手与 CONNECT 解析、`CONNECT_REQ/RESP`、`DATA/FIN/RST`、半关闭、目标拨号与错误码映射（服务端拨号失败 → SOCKS5 REP 码）。
-- 尚未实现（后续阶段）：多路复用（单会话多流）、连接池、真正的优雅排空、指标。
+- 阶段 5（保守形态）：**会话复用池** —— 保底 `pool.size` 条已认证会话、启动错峰、空闲回收、指数退避重建、失效会话摘除、连接级换会话重试；`CONNECT_RESP` 按 StreamID 路由。**每条会话同一时刻只承载 1 条流**（串行复用），因此 AUTH 与 KCP 建链被摊掉，而并发压力靠扩充会话数（至 `max_sessions`）承担。
+- 阶段 7（部分）：传输速率/链路质量统计（见下文「观测」）。
+- 尚未实现：**阶段 4 多路复用（单会话多流）**、真正的优雅排空（阶段 6）、userpass、UDP ASSOCIATE/BIND。
 
 ## 目录结构
 
@@ -19,7 +21,8 @@ gks/
 ├── internal/
 │   ├── protocol/       # 帧编解码、地址/CONNECT 编解码、AEAD/HKDF/nonce、AUTH 与重放缓存
 │   ├── mux/            # Mux/Stream 接口 + Session（读循环/单写循环/心跳/流表）+ Bridge
-│   ├── client/         # SOCKS5 服务端逻辑与单连接处理
+│   ├── client/         # SOCKS5 服务端逻辑、单连接处理、会话复用池（pool.go）、回包路由（router.go）
+│   ├── metrics/        # 进程级计数器与周期采样（速率/重传/错误）
 │   ├── server/         # 会话处理、CONNECT_REQ 拨号与转发
 │   ├── transport/      # KCP 拨号与监听（传输层加密开关）
 │   ├── config/         # 三段式配置（common/client/server）+ 严格校验
@@ -99,6 +102,7 @@ level=INFO msg=传输统计 event=metrics interval=1s sessions=1 streams=1 \
 - 客户端 `payload_recv_total` 应约等于服务端 `payload_sent_total`（反之亦然），不等说明有流被中途重置。
 - `retrans` 是本区间「重传段 / 发送段」（发送段 < 20 时显示 `n/a`）；持续 > 1% 通常意味着 UDP 丢包或限速。
 - `errors` 分别统计认证失败 / 建会话失败 / 本地 SOCKS5 失败 / 目标拨号失败。
+- `sessions` 现在反映的是**池内会话数**（保底 `pool.size`，并发时最多到 `pool.max_sessions`），因此它不再随连接数线性增长——这正是连接池的收益。
 
 **本机参考值**（loopback、MTU 1350、window 256、interval 10ms、crypt=none）：
 
@@ -133,7 +137,7 @@ go vet ./...
 
 ## 已知限制
 
-1. **每条 SOCKS5 连接一条独立 KCP Session**（阶段 3 的设计），因此还没有多路复用与连接池；阶段 4/5 会引入。
+1. **每条会话同一时刻只承载 1 条流**：池已能复用会话（AUTH/建链被摊掉），但**尚未启用多路复用**；并发突刺时按 `client.pool.max_sessions` 扩充会话，超过上限的请求排队等待，受 `client.pool.connect_timeout` 约束（超时回 SOCKS5 `0x01`）。阶段 4 会引入单会话多流。
 2. **服务端不发心跳**，只响应 PING（server 段配置中没有心跳字段）。保活由客户端的 `client.kcp.heartbeat_interval` 负责。
 3. **优雅关闭尚不完整**：kcp-go 的 `Listener.Close()` 会关闭被所有会话共用的 UDP socket，因此收到 SIGTERM 时会立刻断开所有会话，`shutdown_grace` 实际未起到「等活跃流结束」的作用。阶段 6 会改为「先停止 Accept，期间对新会话直接拒绝，排空后再关闭监听」。
 4. `userpass` 本地认证、UDP ASSOCIATE / BIND 未实现（协议预留）。

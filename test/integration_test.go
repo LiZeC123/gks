@@ -19,6 +19,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"github.com/LiZeC123/gks/internal/client"
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/mux"
 	"github.com/LiZeC123/gks/internal/protocol"
 	"github.com/LiZeC123/gks/internal/server"
@@ -72,7 +73,10 @@ func (tr *tracker) wait() {
 type harness struct {
 	targetURL string
 	socksAddr string
-	shutdown  func()
+	// reg 只挂在客户端会话上，因此它统计的是「客户端建立的会话数」。
+	reg      *metrics.Registry
+	pool     *client.SessionPool
+	shutdown func()
 }
 
 func startHarness(t *testing.T) *harness {
@@ -124,33 +128,52 @@ func startHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("SOCKS5 监听失败: %v", err)
 	}
+	reg := &metrics.Registry{}
+	cliSessOpts := mux.Options{
+		PSK:               testPSK,
+		AEAD:              protocol.AEADChaCha20Poly1305,
+		AuthTimeout:       3 * time.Second,
+		HeartbeatInterval: time.Second,
+		HeartbeatMiss:     3,
+		StreamIdleTimeout: 5 * time.Second,
+		Logger:            quiet,
+		Metrics:           reg,
+	}
+	dialer := transport.NewDialer(testTransportOptions())
+	pool := client.NewSessionPool(client.PoolConfig{
+		ServerAddr:     srvLn.Addr().String(),
+		Size:           1,
+		MaxSessions:    8,
+		IdleTimeout:    30 * time.Second,
+		StartupJitter:  10 * time.Millisecond,
+		ConnectTimeout: 3 * time.Second,
+		BackoffMin:     200 * time.Millisecond,
+		BackoffMax:     time.Second,
+	}, dialer, cliSessOpts)
 	cliHandler := client.NewHandler(client.HandlerConfig{
-		ServerAddr: srvLn.Addr().String(),
-		SessionOptions: mux.Options{
-			PSK:               testPSK,
-			AEAD:              protocol.AEADChaCha20Poly1305,
-			AuthTimeout:       3 * time.Second,
-			HeartbeatInterval: time.Second,
-			HeartbeatMiss:     3,
-			StreamIdleTimeout: 5 * time.Second,
-			Logger:            quiet,
-		},
+		ServerAddr:       srvLn.Addr().String(),
+		SessionOptions:   cliSessOpts,
+		Sessions:         pool,
 		HandshakeTimeout: 5 * time.Second,
 		ConnectTimeout:   5 * time.Second,
-	}, transport.NewDialer(testTransportOptions()))
+	}, dialer)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &tracker{}
 	tr.go_(func() { acceptLoop(srvLn, func(c net.Conn) { srvHandler.Handle(ctx, c) }, tr) })
 	tr.go_(func() { acceptLoop(socksLn, func(c net.Conn) { cliHandler.Handle(ctx, c) }, tr) })
+	pool.Start(ctx)
 
 	h := &harness{
 		targetURL: target.URL,
 		socksAddr: socksLn.Addr().String(),
+		reg:       reg,
+		pool:      pool,
 		shutdown: func() {
 			cancel()
 			_ = srvLn.Close()
 			_ = socksLn.Close()
+			pool.Close()
 			tr.wait()
 		},
 	}
@@ -351,4 +374,39 @@ func rawConnectReply(t *testing.T, socksAddr string, target protocol.Address) by
 		t.Fatalf("回复版本 = 0x%02X", head[0])
 	}
 	return head[1]
+}
+
+// TestSessionReuseAcrossSequentialRequests 验证连接池的核心收益：
+// 多次串行请求只建立 1 条 KCP 会话（AUTH 与建链被摊掉）。
+func TestSessionReuseAcrossSequentialRequests(t *testing.T) {
+	h := startHarness(t)
+
+	// 等保底会话就绪，避免第一个请求与预热竞争而多建一条。
+	deadline := time.Now().Add(5 * time.Second)
+	for h.pool.Stats().Idle == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.pool.Stats().Idle == 0 {
+		t.Fatal("会话池未预热出空闲会话")
+	}
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		h.get(t, h.targetURL+"/reuse")
+	}
+
+	if got := h.reg.SessionsTotal.Load(); got != 1 {
+		t.Fatalf("客户端累计建立会话 = %d，期望 1（串行请求应复用同一条会话）", got)
+	}
+	if got := h.reg.StreamsTotal.Load(); got != n {
+		t.Fatalf("累计流数 = %d，期望 %d", got, n)
+	}
+	// 最后一条连接的收尾（归还）是异步的，给它一点时间。
+	deadline = time.Now().Add(5 * time.Second)
+	for h.pool.Stats().InUse != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := h.pool.Stats(); st.Sessions != 1 || st.InUse != 0 {
+		t.Fatalf("请求结束后池状态 = %+v，期望 1 条空闲会话", st)
+	}
 }

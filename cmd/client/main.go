@@ -64,20 +64,36 @@ func run() error {
 		PSK:          psk,
 	})
 
+	sessOpts := mux.Options{
+		PSK:               psk,
+		AEAD:              cfg.Common.AEADName(),
+		AuthTimeout:       cfg.Client.KCP.AuthTimeout.D(),
+		HeartbeatInterval: cfg.Client.KCP.HeartbeatInterval.D(),
+		HeartbeatMiss:     cfg.Client.KCP.HeartbeatMiss,
+		StreamIdleTimeout: cfg.Common.Stream.IdleTimeout.D(),
+		MaxStreams:        cfg.Common.Limits.MaxStreamsPerSession,
+		MaxDataPayload:    cfg.Common.Limits.MaxDataPayload,
+		MaxFrameBody:      cfg.Common.Limits.MaxFrameBody,
+		Logger:            logger,
+	}
+
+	// 会话池：保底 pool.size 条已认证会话，供本地连接复用（同一时刻每条会话 1 条流）。
+	pool := client.NewSessionPool(client.PoolConfig{
+		ServerAddr:     cfg.Client.KCP.Server,
+		Size:           cfg.Client.Pool.Size,
+		MaxSessions:    cfg.Client.Pool.MaxSessions,
+		IdleTimeout:    cfg.Client.Pool.IdleTimeout.D(),
+		StartupJitter:  cfg.Client.Pool.StartupJitter.D(),
+		ConnectTimeout: cfg.Client.Pool.ConnectTimeout.D(),
+		BackoffMin:     cfg.Client.Pool.BackoffMin.D(),
+		BackoffMax:     cfg.Client.Pool.BackoffMax.D(),
+	}, dialer, sessOpts)
+	defer pool.Close()
+
 	handler := client.NewHandler(client.HandlerConfig{
-		ServerAddr: cfg.Client.KCP.Server,
-		SessionOptions: mux.Options{
-			PSK:               psk,
-			AEAD:              cfg.Common.AEADName(),
-			AuthTimeout:       cfg.Client.KCP.AuthTimeout.D(),
-			HeartbeatInterval: cfg.Client.KCP.HeartbeatInterval.D(),
-			HeartbeatMiss:     cfg.Client.KCP.HeartbeatMiss,
-			StreamIdleTimeout: cfg.Common.Stream.IdleTimeout.D(),
-			MaxStreams:        cfg.Common.Limits.MaxStreamsPerSession,
-			MaxDataPayload:    cfg.Common.Limits.MaxDataPayload,
-			MaxFrameBody:      cfg.Common.Limits.MaxFrameBody,
-			Logger:            logger,
-		},
+		ServerAddr:       cfg.Client.KCP.Server,
+		SessionOptions:   sessOpts,
+		Sessions:         pool,
 		HandshakeTimeout: cfg.Client.Socks5.HandshakeTimeout.D(),
 		ConnectTimeout:   cfg.Client.Socks5.ConnectTimeout.D(),
 	}, dialer)
@@ -109,6 +125,9 @@ func run() error {
 	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, transport.SnmpStats)
 	go sampler.Run(ctx)
 
+	// 预热并维护会话池（保底重建 + 空闲回收）。
+	pool.Start(ctx)
+
 	var wg sync.WaitGroup
 	for {
 		conn, err := ln.Accept()
@@ -132,8 +151,16 @@ func run() error {
 	} else {
 		logger.Warn("等待活跃连接超时，强制退出", log.Event, "client_stop", "grace", grace.String())
 	}
-	// 退出前再打一条汇总（含累计会话/流数与错误计数）。
+	// 退出前再打一条汇总（含累计会话/流数与错误计数），以及会话池状态。
 	sampler.Log(sampler.Sample())
+	ps := pool.Stats()
+	logger.Info("会话池状态",
+		log.Event, "pool_stats",
+		"sessions", ps.Sessions,
+		"in_use", ps.InUse,
+		"idle", ps.Idle,
+		"rebuilds", ps.Rebuilds,
+	)
 	return nil
 }
 
