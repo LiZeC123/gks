@@ -33,6 +33,7 @@ common:
     max_streams_per_session: 256     # 客户端开流上限 = 服务端接受上限
     max_frame_body: 65536            # 超过即断开（防伪造长度挂起）
     max_data_payload: 16384          # 发送方据此拆帧
+  metrics_interval: 10s              # 传输统计采样间隔（B/s、线速率、重传率），0 = 关闭
 
 client:
   listen: "127.0.0.1:2080"           # 本地 SOCKS5 TCP 监听

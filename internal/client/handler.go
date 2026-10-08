@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LiZeC123/gks/internal/log"
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/mux"
 	"github.com/LiZeC123/gks/internal/protocol"
 )
@@ -70,6 +71,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	target, err := h.socks5Handshake(conn)
 	if err != nil {
+		metrics.Default.Socks5Failures.Add(1)
 		if rep, ok := ReplyForError(err); ok {
 			_ = WriteReply(conn, rep, protocol.UnspecificBind())
 		}
@@ -80,6 +82,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	sess, err := h.dialSession(ctx)
 	if err != nil {
+		metrics.Default.SessionDialFailures.Add(1)
 		_ = WriteReply(conn, protocol.RepHostUnreachable, protocol.UnspecificBind())
 		h.log.Warn("建立会话失败",
 			log.Event, "session_dial_failed", log.Remote, local,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LiZeC123/gks/internal/log"
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/mux"
 	"github.com/LiZeC123/gks/internal/protocol"
 )
@@ -135,6 +136,7 @@ func (h *Handler) handleConnect(ctx context.Context, sess *mux.Session, f protoc
 	conn, err := h.dialer.DialContext(dialCtx, "tcp", target.Address())
 	if err != nil {
 		rep := protocol.ReplyFromDialError(err)
+		metrics.Default.DialFailures.Add(1)
 		h.log.Warn("拨号目标失败",
 			log.Event, "dial_failed",
 			log.SessionID, sess.Conv(), log.StreamID, f.StreamID,

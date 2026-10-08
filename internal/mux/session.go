@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/LiZeC123/gks/internal/log"
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/protocol"
 )
 
@@ -91,7 +92,9 @@ type Options struct {
 	MaxDataPayload int
 	// MaxFrameBody 是接收侧单帧帧体上限，默认 protocol.MaxFrameBody。
 	MaxFrameBody int
-	Logger       *slog.Logger
+	// Metrics 是进程级计数器；为 nil 时使用 metrics.Default。
+	Metrics *metrics.Registry
+	Logger  *slog.Logger
 	// Now 与 Rand 可为空，测试时可注入。
 	Now  func() time.Time
 	Rand io.Reader
@@ -130,6 +133,9 @@ func (o *Options) normalize() error {
 	}
 	if o.MaxFrameBody <= 0 || o.MaxFrameBody > protocol.MaxFrameBody {
 		o.MaxFrameBody = protocol.MaxFrameBody
+	}
+	if o.Metrics == nil {
+		o.Metrics = metrics.Default
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -243,6 +249,7 @@ func AcceptSession(ctx context.Context, conn net.Conn, opts Options) (*Session, 
 		return nil, err
 	}
 	if err := s.serverHandshake(); err != nil {
+		s.opts.Metrics.AuthFailures.Add(1)
 		s.closeWith(err)
 		return nil, err
 	}
@@ -259,6 +266,7 @@ func DialSession(ctx context.Context, conn net.Conn, opts Options) (*Session, er
 		return nil, err
 	}
 	if err := s.clientHandshake(); err != nil {
+		s.opts.Metrics.AuthFailures.Add(1)
 		s.closeWith(err)
 		return nil, err
 	}
@@ -418,6 +426,8 @@ func (s *Session) start() {
 		"aead", s.opts.AEAD,
 		"heartbeat_interval", s.opts.HeartbeatInterval.String(),
 	)
+	s.opts.Metrics.SessionsActive.Add(1)
+	s.opts.Metrics.SessionsTotal.Add(1)
 	s.wg.Add(2)
 	go s.readLoop()
 	go s.writeLoop()
@@ -656,6 +666,7 @@ func (s *Session) closeWith(err error) {
 		s.errMu.Unlock()
 		close(s.closed)
 		_ = s.conn.Close()
+		s.opts.Metrics.SessionsActive.Add(-1)
 		// 会话关闭等于向所有流广播 RST（dev.md §3.8）。
 		s.resetAllStreams(ErrSessionClosed)
 		s.log.Info("会话关闭",

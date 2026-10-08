@@ -70,6 +70,8 @@ type Common struct {
 	Stream Stream `yaml:"stream"`
 	// Limits 是帧与流的上限：发送方必须遵守，接收方据此校验。
 	Limits Limits `yaml:"limits"`
+	// MetricsInterval 是传输统计的采样间隔；0 表示关闭。
+	MetricsInterval Duration `yaml:"metrics_interval"`
 }
 
 // KCPTuning 是两端共用的 KCP 调参。
@@ -248,6 +250,7 @@ func (c *Common) Validate() error {
 	validateKCPTuning(p, "common.kcp", &c.KCP)
 
 	p.require(c.Stream.IdleTimeout.D() > 0, "common.stream.idle_timeout: 必须大于 0")
+	p.require(c.MetricsInterval.D() >= 0, "common.metrics_interval: 不能为负（0 表示关闭）")
 
 	p.require(c.Limits.MaxStreamsPerSession >= 1 && c.Limits.MaxStreamsPerSession <= MaxStreamsPerSess,
 		"common.limits.max_streams_per_session: 需在 [1,%d]，实际 %d", MaxStreamsPerSess, c.Limits.MaxStreamsPerSession)

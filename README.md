@@ -73,7 +73,7 @@ curl --socks5 127.0.0.1:2080 http://www.baidu.com
 
 | 段 | 内容 | 为什么这样分 |
 | --- | --- | --- |
-| `common` | `psk`、`crypt`、`aead`、`kcp`（interval/mtu/window/FEC）、`stream.idle_timeout`、`limits`（流数上限、帧体上限、单帧 Payload 上限） | **两端必须一致**，只写一次就不存在写岔的可能 |
+| `common` | `psk`、`crypt`、`aead`、`kcp`（interval/mtu/window/FEC）、`stream.idle_timeout`、`limits`（流数上限、帧体上限、单帧 Payload 上限）、`metrics_interval` | **两端必须一致**，只写一次就不存在写岔的可能 |
 | `client` | `listen`（默认 `127.0.0.1:2080`）、`socks5`（握手/连接超时）、`auth`、连接池、服务端地址、心跳、日志级别 | 仅客户端使用 |
 | `server` | `listen`、认证窗口与重放缓存、拨号超时、日志级别 | 仅服务端使用 |
 
@@ -83,6 +83,37 @@ curl --socks5 127.0.0.1:2080 http://www.baidu.com
 - `common.crypt`：`none`（默认，阶段 B）或 `aes-128-gcm` 等（阶段 A，见 dev.md §0.3）。
 - `client.auth.mode` 目前只支持 `none`；`userpass` 尚未实现（配置中出现会直接报错）。
 - 校验用 `errors.Join`，会**一次性报出** `common` 与该端段落里的所有问题。
+
+## 观测：传输速率与链路质量
+
+在 `common.metrics_interval` 设成非 0（示例里是 10s）后，两端各自周期打一行 `event=metrics` 日志：
+
+```text
+level=INFO msg=传输统计 event=metrics interval=1s sessions=1 streams=1 \
+  payload_sent="54.3 MB/s" payload_recv="88 B/s" wire_sent="71.9 MB/s" wire_recv="24.8 KB/s" \
+  payload_sent_total="100.0 MB" payload_recv_total="88 B" wire_sent_total="102.1 MB" wire_recv_total="35.5 KB" \
+  retrans=0.00% lost_segs=0 errors="auth=0 session=0 socks5=0 dial=0"
+```
+
+- `payload_*` 是**隧道载荷**速率（实时累加），`wire_*` 是 **UDP 线速率**（来自 kcp-go 的 `DefaultSnmp`）；两者之比就是链路开销。
+- 客户端 `payload_recv_total` 应约等于服务端 `payload_sent_total`（反之亦然），不等说明有流被中途重置。
+- `retrans` 是本区间「重传段 / 发送段」（发送段 < 20 时显示 `n/a`）；持续 > 1% 通常意味着 UDP 丢包或限速。
+- `errors` 分别统计认证失败 / 建会话失败 / 本地 SOCKS5 失败 / 目标拨号失败。
+
+**本机参考值**（loopback、MTU 1350、window 256、interval 10ms、crypt=none）：
+
+| 场景 | 数值 |
+| --- | --- |
+| 100MB 经代理下载 | 载荷 ≈ 214 MB/s（约 1.7 Gbit/s） |
+| 同上，直连 loopback 对照 | ≈ 1.78 GB/s |
+| 线/载荷 开销比 | ≈ 1.02（2%） |
+| retrans | 0%（loopback） |
+
+需要**精确**的线速率、包长分布与重传时，可在自己机器上抓包（沙箱内无权限）：
+
+```bash
+sudo tcpdump -i en0 -n udp port 4010 -w kcp.pcap   # 再交给 Wireshark IO Graph / capinfos
+```
 
 ## 测试
 
@@ -98,6 +129,7 @@ go vet ./...
 - 认证：时间窗边界、重放拒绝、错误 PSK（不污染重放缓存）、proof 域分离。
 - 会话与流：真实 KCP 上的握手 + 心跳判死、安全态明文帧必须断开（不降级）、双向数据、1MB 级大块分帧重组、半关闭、RST 传播、未知 StreamID 丢弃、接收缓冲长时间满 → 重置该流、会话关闭广播 RST。
 - 端到端：进程内起 server + client + HTTP 目标，经 `golang.org/x/net/proxy` 走 SOCKS5 访问；IPv4 与域名（远程 DNS）目标、512KB 大body、8 并发、连接被拒与 DNS 失败的错误码。
+- 指标：速率计算（含零间隔、计数器回退）、重传率小样本保护、会话/流/载荷字节的计数器准确性、日志字段完整性。
 
 ## 已知限制
 

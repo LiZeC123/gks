@@ -16,6 +16,7 @@ import (
 
 	"github.com/LiZeC123/gks/internal/config"
 	"github.com/LiZeC123/gks/internal/log"
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/mux"
 	"github.com/LiZeC123/gks/internal/protocol"
 	"github.com/LiZeC123/gks/internal/server"
@@ -112,6 +113,10 @@ func run() error {
 		_ = tln.Close()
 	}()
 
+	// 传输统计：每 metrics_interval 打一行（0 表示关闭）。
+	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, transport.SnmpStats)
+	go sampler.Run(ctx)
+
 	for {
 		conn, err := tln.Accept()
 		if err != nil {
@@ -146,6 +151,8 @@ func run() error {
 	} else {
 		logger.Warn("等待活跃会话超时，强制退出", log.Event, "server_stop", "grace", grace.String())
 	}
+	// 退出前再打一条汇总（含累计会话/流数与错误计数）。
+	sampler.Log(sampler.Sample())
 	return nil
 }
 

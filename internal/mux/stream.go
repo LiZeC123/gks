@@ -190,9 +190,15 @@ var _ Stream = (*stream)(nil)
 func (st *stream) StreamID() uint32 { return st.id }
 
 // Read 读取对端发来的数据。
+//
+// 载荷字节实时累加到进程计数器，这样它与传输层的线速率为同一时间窗口口径，
+// 便于直接对比（dev.md §9.5 的速率观测）。
 func (st *stream) Read(p []byte) (int, error) {
 	n, err := st.recv.Read(p)
-	st.recvBytes.Add(uint64(n))
+	if n > 0 {
+		st.recvBytes.Add(uint64(n))
+		st.sess.opts.Metrics.PayloadReceived.Add(uint64(n))
+	}
 	return n, err
 }
 
@@ -226,6 +232,7 @@ func (st *stream) Write(p []byte) (int, error) {
 		written = end
 	}
 	st.sentBytes.Add(uint64(written))
+	st.sess.opts.Metrics.PayloadSent.Add(uint64(written))
 	return written, nil
 }
 
@@ -322,6 +329,8 @@ func (st *stream) finish(err error) {
 			"recv_bytes", st.recvBytes.Load(),
 			"err", err,
 		)
+		// 载荷字节已在 Read/Write 时实时累加，这里只回收活跃流计数。
+		st.sess.opts.Metrics.StreamsActive.Add(-1)
 	})
 }
 
@@ -379,6 +388,8 @@ func (s *Session) newStreamLocked(id uint32) *stream {
 		s.streamsMu.Unlock()
 	}
 	s.streams[id] = st
+	s.opts.Metrics.StreamsActive.Add(1)
+	s.opts.Metrics.StreamsTotal.Add(1)
 	s.log.Debug("流建立", log.Event, "stream_up", log.StreamID, id)
 	return st
 }
