@@ -133,6 +133,10 @@ assert isinstance(p["payload"]["sent_total"], int), p["payload"]
 }
 
 log "统计端点（默认静默启动下仍然提供 JSON）"
+# 先等两个统计端口就绪：客户端 SOCKS 端口就绪不代表服务端已绑好统计端点
+# （服务端启动时要先建重放缓存，比客户端慢），否则会把启动竞态误报成 FAIL。
+wait_port 127.0.0.1 "${METRICS_PORT_CLIENT}" || echo "  警告：客户端统计端点 ${METRICS_PORT_CLIENT} 未就绪"
+wait_port 127.0.0.1 "${METRICS_PORT_SERVER}" || echo "  警告：服务端统计端点 ${METRICS_PORT_SERVER} 未就绪"
 check_metrics "${METRICS_PORT_CLIENT}" client
 check_metrics "${METRICS_PORT_SERVER}" server
 
