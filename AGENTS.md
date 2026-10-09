@@ -79,7 +79,7 @@ GOCACHE=/tmp/gks-gocache go test -buildvcs=false ./...
   - `common` 只放「两端必须一致」的字段；写进 `client`/`server` 会因严格模式启动失败。
 - 观测有三个出口，职责不要混：
   - **控制台表格**（人看）：`internal/metrics/table.go` 只产出纯文本；TTY 原地刷新的控制序列在
-    `internal/monitor`；`-no-console` / `--no-console` 关闭。
+    `internal/monitor`；默认**不输出**，加 `-console` 才在控制台周期刷新。
   - **`GET /metrics`、`GET /healthz`**（程序拉）：JSON 字段是**外部契约**，改动字段或语义必须
     同步 README 的 JSON 表并提升 `schema_version`。
   - **日志文件**（事后查）：日志只写 `*.log.file`，为空即丢弃；控制台不再出现日志。

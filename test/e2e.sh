@@ -82,9 +82,9 @@ python3 -m http.server "${TARGET_PORT}" --directory "${TMP}" >"${TMP}/target.log
 PIDS+=("$!")
 
 log "启动 gks 服务端与客户端"
-"${TMP}/server" -c "${TMP}/gks.yaml" -no-console >"${TMP}/server.log" 2>&1 &
+"${TMP}/server" -c "${TMP}/gks.yaml" >"${TMP}/server.log" 2>&1 &
 PIDS+=($!)
-"${TMP}/client" -c "${TMP}/gks.yaml" -no-console >"${TMP}/client.log" 2>&1 &
+"${TMP}/client" -c "${TMP}/gks.yaml" >"${TMP}/client.log" 2>&1 &
 PIDS+=($!)
 
 wait_port 127.0.0.1 "${SOCKS_PORT}" || { echo "SOCKS5 端口未就绪"; cat "${TMP}/client.log"; exit 1; }
@@ -132,7 +132,7 @@ assert isinstance(p["payload"]["sent_total"], int), p["payload"]
   fi
 }
 
-log "统计端点（-no-console 下仍然提供 JSON）"
+log "统计端点（默认静默启动下仍然提供 JSON）"
 check_metrics "${METRICS_PORT_CLIENT}" client
 check_metrics "${METRICS_PORT_SERVER}" server
 

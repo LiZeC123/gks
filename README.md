@@ -17,9 +17,9 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
 - 流语义：半关闭（FIN）、RST、未知 StreamID 丢弃、会话关闭广播 RST。
 - 错误码：服务端拨号失败按 SOCKS5 REP 码回传（`5` 拒绝 / `4` 主机不可达 / `3` 网络不可达 / `6` 超时 / `1` 其他）。
 - 链路：心跳保活与判死、可选 KCP 参数与 FEC、传输速率/重传/FEC/池状态指标。
-- 观测：控制台周期刷新的统计表格（`-no-console` 可关）、统计 HTTP 端点
-  （`GET /metrics` JSON + `GET /healthz`，默认 `127.0.0.1:12081`）、结构化日志只写配置文件指定的文件
-  （留空则丢弃任何日志）。
+- 观测：默认**静默运行**（控制台不输出任何内容），加 `-console` 才在控制台周期刷新统计表格；
+  统计 HTTP 端点（`GET /metrics` JSON + `GET /healthz`，默认 `127.0.0.1:12081`）；
+  结构化日志只写配置文件指定的文件（留空则丢弃任何日志）。
 - 监控面板：独立工具 `gks-dashboard`（`cmd/dashboard`）周期拉取 `/metrics`，用网页展示累计量、
   窗口速率、四张折线图与派生指标；页面与静态资源全部内嵌进二进制，可单文件分发。
 - 运行：panic 隔离、SIGTERM/SIGINT 退出。
@@ -74,11 +74,61 @@ sed -i.bak "s|^  psk: .*|  psk: \"$PSK\"|" gks.yaml && rm -f gks.yaml.bak
 ```bash
 curl -s 127.0.0.1:12081/metrics | python3 -m json.tool      # 客户端统计（窗口 = metrics_interval，示例 1s）
 curl -s '127.0.0.1:12082/metrics?window=1s'                  # 服务端统计（1s 窗口）
-./bin/client -c gks.yaml -no-console &                       # 只要端点、不要控制台表格
+./bin/client -c gks.yaml -console &                          # 想在终端看统计表格就加 -console
 ```
 
 两个程序的日志默认都**不写文件**（示例配置 `log.file: ""`）；需要留档时在配置里写
 `log.file: "logs/client.log"`（父目录会自动创建）。
+
+## 常见启动方式
+
+两个程序都读同一份配置（各取自己的段落），下面的命令在 `gks/` 目录下执行；`-console` 可选，
+不加就是静默运行。**默认组合（不加 `-console` + `log.file: ""`）不会有任何控制台输出**，
+统计只从 HTTP 端点拿。
+
+```bash
+# 1) 静默常驻（生产推荐）：只提供 SOCKS5 代理 + 本地统计端点，控制台与日志都无输出
+./bin/server -c gks.yaml &
+./bin/client -c gks.yaml &
+
+# 2) 终端里看统计表格（本地排查时用；Ctrl-C 退出）
+./bin/server -c gks.yaml -console
+./bin/client -c gks.yaml -console
+
+# 3) 静默 + 日志落文件（配置里写 log.file，父目录自动创建）
+#    client.log.file: "logs/client.log"   /   server.log.file: "logs/server.log"
+./bin/client -c gks.yaml &
+
+# 4) 拉取统计（无需 -console；外部程序也可以这样周期拉）
+curl -s 127.0.0.1:12081/metrics | python3 -m json.tool          # 客户端
+curl -s '127.0.0.1:12082/metrics?window=1s' | python3 -m json.tool  # 服务端（1s 窗口）
+
+# 5) 启动监控面板（网页看累计量/速率/折线图；与 gks 完全解耦，可单文件分发）
+go build -o bin/dashboard ./cmd/dashboard
+./bin/dashboard                                                  # 拉客户端 12081，监听 0.0.0.0:12080
+./bin/dashboard -pull 127.0.0.1:12082 -listen 127.0.0.1:12080     # 改看服务端 / 只监听本机
+# 浏览器打开 http://127.0.0.1:12080/
+
+# 6) 一键端到端验收（自建临时配置与随机 PSK，不会碰你手头的 gks.yaml）
+./test/e2e.sh
+```
+
+后台运行建议交给 systemd（或 `nohup`），例如：
+
+```ini
+[Unit]
+Description=gks client
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/gks
+ExecStart=/opt/gks/bin/client -c /opt/gks/gks.yaml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ## 使用方式
 
@@ -164,12 +214,15 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 
 ## 观测与调优
 
-观测有三个出口，职责分明：**控制台表格**（人看）、**HTTP 端点**（程序拉）、**日志文件**（事后查）。
-与统计无关的事件日志（启动/停止/会话/错误）只写文件，不会和控制台表格抢屏。
+观测有三个出口，职责分明：**控制台表格**（人看，默认关闭，`-console` 打开）、
+**HTTP 端点**（程序拉，始终可用）、**日志文件**（事后查，`log.file` 为空即丢弃）。
+默认状态下进程不产生任何输出；与统计无关的事件日志（启动/停止/会话/错误）只写文件，
+不会和控制台表格抢屏。
 
-### 控制台表格
+### 控制台表格（`-console` 显式开启）
 
-启动后每 `common.metrics_interval` 刷新一次（示例配置为 1s）：
+**默认不输出**：不加参数时进程在控制台完全静默（日志也只写文件）。加上 `-console` 后，
+每 `common.metrics_interval` 刷新一次（示例配置为 1s）：
 
 ```text
 gks client · 运行 1h02m03s · 窗口 1s · 2025-10-09 13:02:01
@@ -193,12 +246,12 @@ gks client · 运行 1h02m03s · 窗口 1s · 2025-10-09 13:02:01
 
 - 终端（TTY）里**原地刷新**；输出被重定向到文件/管道时，每个周期**追加**一份同样的纯文本表格
   （不含 ANSI 转义，可直接留档）。
-- 表格写 stdout。`-no-console`（等价 `--no-console`）关闭表格；配合 `log.file: ""`
-  就是**完全静默**：进程不产生任何输出。
+- 表格写 stdout，只有 `-console`（client / server 都支持）才会开启；不加就是完全静默
+  （配合默认的 `log.file: ""`，进程不产生任何输出）。
 - 启动初期历史不足一个窗口时，速率与增量列显示 `n/a`，此时会多一行提示；攒够窗口后自动消失。
 - 刷新周期就是 `metrics_interval`。**输出被重定向到文件时每个周期会追加一份表格**，周期太短会把
-  日志撑大（1s 约每天 340 万行）：往文件里留档时建议调到 `10s` 以上，或者干脆用 `-no-console`
-  只保留 `/metrics` 端点。
+  日志撑大（1s 约每天 340 万行）：往文件里留档时建议调到 `10s` 以上，或者不加 `-console`
+  只保留 `/metrics` 端点（默认就是这样）。
 - 分组顺序固定：会话/流 → 载荷速率 → 线速率 → 累计量 → 链路质量 → 会话池（仅客户端）→ 错误；
   末行固定为 `[告警]`（无异常显示 `[告警] 无`）。告警判据：`pool_waiters > 0`、
   `retrans > 1%`（发送段 ≥ 20 时）、`fec_errs > 0`、`kcp_in_errors > 0`。
@@ -346,7 +399,8 @@ HTTP 路由：
 | 改了 `common` 却不生效 | 两端必须用同一份配置并**都重启**；`common` 与 `client`/`server` 的字段不能互换（严格模式会报错） |
 | 会话反复重建（`pool_rebuilds` 增长） | 链路质量差或服务端不可达；看 `session_down` 的原因 |
 | 启动报 `统计端点监听 127.0.0.1:12081: address already in use` | 同机跑了两个 gks（或端口被占）：把 `server.metrics.listen` 换成 `127.0.0.1:12082`，或写 `""` 关闭端点 |
-| 终端里什么都看不到 | 日志只写 `log.file`（留空即丢弃），控制台只有统计表格；`-no-console` + 空 `log.file` 就是**完全静默**，这是预期行为 |
+| 终端里什么都看不到 | 这是默认行为：控制台不输出统计（要加 `-console`），日志只写 `log.file`（留空即丢弃） |
+| 启动报 `flag provided but not defined: -no-console` | 已改为默认静默：去掉 `-no-console`，想输出统计表格改加 `-console` |
 | `curl 127.0.0.1:12081/metrics` 连不上 | 端点被写成空串关了、端口写错、或程序没起来；看日志里的 `metrics_listen` 字段 |
 | `rate_available: false` | 启动时间不足一个 `metrics_interval`，历史还没攒够一个完整窗口；等一个周期再拉，或把 `?window=` 调小 |
 | 面板页面显示「上游不可达」 | gks 没在跑、`-pull` 指错端口、或端点被 `metrics.listen: ""` 关了；面板会一直重试，gks 起来后自动恢复 |

@@ -4,8 +4,9 @@
 // 阶段三形态（dev.md §8）：每条本地 SOCKS5 连接使用一条独立 KCP Session，
 // 会话上开一条流承载该连接（连接池见阶段 5，多路复用见阶段 4）。
 //
-// 观测：日志只写配置文件指定的文件（为空则丢弃），控制台留给周期刷新的统计表格；
-// 统计另经 HTTP 端点（默认 127.0.0.1:12081）以 JSON 暴露，供外部程序周期拉取。
+// 观测：默认静默——日志只写配置文件指定的文件（为空即丢弃），控制台不输出任何内容；
+// 加 -console 才会在控制台周期刷新统计表格。统计另经 HTTP 端点（默认 127.0.0.1:12081）
+// 以 JSON 暴露，供外部程序周期拉取。
 package main
 
 import (
@@ -37,9 +38,9 @@ func main() {
 
 func run() error {
 	var cfgPath string
-	var noConsole bool
+	var console bool
 	flag.StringVar(&cfgPath, "c", "gks.yaml", "配置文件路径")
-	flag.BoolVar(&noConsole, "no-console", false, "关闭控制台统计表格（配合空 log.file 即完全静默）")
+	flag.BoolVar(&console, "console", false, "在控制台周期刷新统计表格（默认关闭：不产生任何控制台输出）")
 	flag.Parse()
 
 	startedAt := time.Now()
@@ -142,7 +143,7 @@ func run() error {
 		Role:       "client",
 		Collector:  collector,
 		HTTPAddr:   metricsAddr,
-		Console:    !noConsole,
+		Console:    console,
 		ConsoleOut: os.Stdout,
 		StartedAt:  startedAt,
 		Logger:     logger,
@@ -166,7 +167,7 @@ func run() error {
 		"metrics_listen", metricsListen,
 		"metrics_interval", cfg.Common.MetricsInterval.D().String(),
 		"log_file", cfg.Client.Log.File,
-		"console", !noConsole,
+		"console", console,
 	)
 
 	go func() {
