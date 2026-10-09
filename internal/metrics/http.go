@@ -53,7 +53,7 @@ func (h *statsHandler) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	window, err := h.window(r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorPayload{Error: err.Error()})
+		writeJSON(w, http.StatusBadRequest, ErrorPayload{Error: err.Error()})
 		return
 	}
 	now := h.opts.Now()
@@ -65,7 +65,7 @@ func (h *statsHandler) healthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.opts.Now()
-	writeJSON(w, http.StatusOK, healthPayload{
+	writeJSON(w, http.StatusOK, HealthPayload{
 		Status:        "ok",
 		Role:          h.opts.Role,
 		StartedAt:     h.opts.StartedAt,
@@ -75,7 +75,7 @@ func (h *statsHandler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *statsHandler) notFound(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotFound, errorPayload{Error: fmt.Sprintf("未知路径 %s（可用：/metrics、/healthz）", r.URL.Path)})
+	writeJSON(w, http.StatusNotFound, ErrorPayload{Error: fmt.Sprintf("未知路径 %s（可用：/metrics、/healthz）", r.URL.Path)})
 }
 
 // window 解析并校验 ?window=。
@@ -94,8 +94,15 @@ func (h *statsHandler) window(r *http.Request) (time.Duration, error) {
 	return d, nil
 }
 
-// 线上格式按 schema_version 固定字段名；速率相关字段用指针以便输出 null。
-type metricsPayload struct {
+// SchemaVersion 是 /metrics 线上 JSON 的契约版本。字段语义变化时必须同步递增，
+// 并更新 README 的 JSON 表（消费方：cmd/dashboard 与外部监控程序）。
+const SchemaVersion = 1
+
+// Payload 是 /metrics 的线上格式（JSON tag 即外部契约）。
+//
+// 该类型同时被面板工具（cmd/dashboard）解码使用，因此字段语义变化必须走 schema_version。
+// 速率相关字段用指针以便输出/解析 null。
+type Payload struct {
 	SchemaVersion     int           `json:"schema_version"`
 	Role              string        `json:"role"`
 	StartedAt         time.Time     `json:"started_at"`
@@ -103,29 +110,29 @@ type metricsPayload struct {
 	Now               time.Time     `json:"now"`
 	RateWindowSeconds float64       `json:"rate_window_seconds"`
 	RateAvailable     bool          `json:"rate_available"`
-	Sessions          countPair     `json:"sessions"`
-	Streams           countPair     `json:"streams"`
-	Payload           ioRates       `json:"payload"`
-	Wire              ioRates       `json:"wire"`
-	Link              linkPayload   `json:"link"`
-	Pool              poolPayload   `json:"pool"`
-	Errors            errorCounters `json:"errors"`
+	Sessions          CountPair     `json:"sessions"`
+	Streams           CountPair     `json:"streams"`
+	Payload           IORates       `json:"payload"`
+	Wire              IORates       `json:"wire"`
+	Link              LinkPayload   `json:"link"`
+	Pool              PoolPayload   `json:"pool"`
+	Errors            ErrorCounters `json:"errors"`
 	Alarms            []string      `json:"alarms"`
 }
 
-type countPair struct {
+type CountPair struct {
 	Active int64  `json:"active"`
 	Total  uint64 `json:"total"`
 }
 
-type ioRates struct {
+type IORates struct {
 	SentTotal uint64   `json:"sent_total"`
 	RecvTotal uint64   `json:"recv_total"`
 	SentBps   *float64 `json:"sent_bps"`
 	RecvBps   *float64 `json:"recv_bps"`
 }
 
-type linkWindow struct {
+type LinkWindow struct {
 	Seconds               float64  `json:"seconds"`
 	OutSegs               *uint64  `json:"out_segs"`
 	RetransRatio          *float64 `json:"retrans_ratio"`
@@ -137,15 +144,15 @@ type linkWindow struct {
 	FECErrs               *uint64  `json:"fec_errs"`
 }
 
-type linkPayload struct {
+type LinkPayload struct {
 	OutSegsTotal         uint64     `json:"out_segs_total"`
 	InSegsTotal          uint64     `json:"in_segs_total"`
 	RetransSegsTotal     uint64     `json:"retrans_segs_total"`
 	FastRetransSegsTotal uint64     `json:"fast_retrans_segs_total"`
-	Window               linkWindow `json:"window"`
+	Window               LinkWindow `json:"window"`
 }
 
-type poolPayload struct {
+type PoolPayload struct {
 	Available bool   `json:"available"`
 	InUse     int    `json:"in_use"`
 	Idle      int    `json:"idle"`
@@ -154,14 +161,14 @@ type poolPayload struct {
 	Rebuilds  uint64 `json:"rebuilds"`
 }
 
-type errorCounters struct {
+type ErrorCounters struct {
 	Auth    uint64 `json:"auth"`
 	Session uint64 `json:"session"`
 	Socks5  uint64 `json:"socks5"`
 	Dial    uint64 `json:"dial"`
 }
 
-type healthPayload struct {
+type HealthPayload struct {
 	Status        string    `json:"status"`
 	Role          string    `json:"role"`
 	StartedAt     time.Time `json:"started_at"`
@@ -169,40 +176,40 @@ type healthPayload struct {
 	Now           time.Time `json:"now"`
 }
 
-type errorPayload struct {
+type ErrorPayload struct {
 	Error string `json:"error"`
 }
 
 // buildMetricsPayload 把一次 View 转成线上 JSON 结构。
-func buildMetricsPayload(v View, o HTTPOptions, now time.Time) metricsPayload {
+func buildMetricsPayload(v View, o HTTPOptions, now time.Time) Payload {
 	r := v.Now.Registry
-	win := linkWindow{Seconds: v.UserWindow.Seconds()}
-	p := metricsPayload{
-		SchemaVersion:     1,
+	win := LinkWindow{Seconds: v.UserWindow.Seconds()}
+	p := Payload{
+		SchemaVersion:     SchemaVersion,
 		Role:              o.Role,
 		StartedAt:         o.StartedAt,
 		UptimeSeconds:     seconds(now.Sub(o.StartedAt)),
 		Now:               now,
 		RateWindowSeconds: v.UserWindow.Seconds(),
 		RateAvailable:     v.HasRates,
-		Sessions:          countPair{Active: r.SessionsActive, Total: r.SessionsTotal},
-		Streams:           countPair{Active: r.StreamsActive, Total: r.StreamsTotal},
-		Payload: ioRates{
+		Sessions:          CountPair{Active: r.SessionsActive, Total: r.SessionsTotal},
+		Streams:           CountPair{Active: r.StreamsActive, Total: r.StreamsTotal},
+		Payload: IORates{
 			SentTotal: r.PayloadSent,
 			RecvTotal: r.PayloadReceived,
 		},
-		Wire: ioRates{
+		Wire: IORates{
 			SentTotal: v.Now.Transport.UDPBytesSent,
 			RecvTotal: v.Now.Transport.UDPBytesReceived,
 		},
-		Link: linkPayload{
+		Link: LinkPayload{
 			OutSegsTotal:         v.Now.Transport.OutSegs,
 			InSegsTotal:          v.Now.Transport.InSegs,
 			RetransSegsTotal:     v.Now.Transport.RetransSegs,
 			FastRetransSegsTotal: v.Now.Transport.FastRetransSegs,
 			Window:               win,
 		},
-		Pool: poolPayload{
+		Pool: PoolPayload{
 			Available: v.HasPool,
 			InUse:     v.Now.Pool.InUse,
 			Idle:      v.Now.Pool.Idle,
@@ -210,7 +217,7 @@ func buildMetricsPayload(v View, o HTTPOptions, now time.Time) metricsPayload {
 			Waiters:   v.Now.Pool.Waiters,
 			Rebuilds:  v.Now.Pool.Rebuilds,
 		},
-		Errors: errorCounters{
+		Errors: ErrorCounters{
 			Auth:    r.AuthFailures,
 			Session: r.SessionDialFailures,
 			Socks5:  r.Socks5Failures,
@@ -248,7 +255,7 @@ func allowGet(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	w.Header().Set("Allow", "GET, HEAD")
-	writeJSON(w, http.StatusMethodNotAllowed, errorPayload{Error: fmt.Sprintf("不支持的方法 %s（只支持 GET/HEAD）", r.Method)})
+	writeJSON(w, http.StatusMethodNotAllowed, ErrorPayload{Error: fmt.Sprintf("不支持的方法 %s（只支持 GET/HEAD）", r.Method)})
 	return false
 }
 

@@ -81,6 +81,11 @@ GOCACHE=/tmp/gks-gocache go test -buildvcs=false ./...
     同步 README 的 JSON 表并提升 `schema_version`。
   - **日志文件**（事后查）：日志只写 `*.log.file`，为空即丢弃；控制台不再出现日志。
     表格与空 `log.file` 同时生效即「完全静默」。
+  - `cmd/dashboard`（`gks-dashboard`）是 `/metrics` 的**只读消费者**：改 `/metrics` 的字段或语义时
+    必须同时检查 `internal/dashboard` 的解码与页面渲染；它自己的 `/api/state` 同样是对外契约
+    （版本见 `internal/dashboard/server.go` 的 `stateSchemaVersion`），改动需同步 README。
+  - 面板资源（`internal/dashboard/assets/`）必须保持自包含：不得引用任何外部 CDN/字体/图标，
+    否则单文件分发会缺资源（有单测兜底）。
 - 统计口径集中在 `internal/metrics`（`Collector` + 1s 粒度环形历史，保留 10 分钟）；
   `common.metrics_interval` = 控制台刷新周期 + `/metrics` 默认速率窗口（必须 > 0 且 ≤ 10m）。
   速率一律由历史窗口两端算出，不要在别处再实现一套采样。

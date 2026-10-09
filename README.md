@@ -20,6 +20,8 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
 - 观测：控制台周期刷新的统计表格（`-no-console` 可关）、统计 HTTP 端点
   （`GET /metrics` JSON + `GET /healthz`，默认 `127.0.0.1:12081`）、结构化日志只写配置文件指定的文件
   （留空则丢弃任何日志）。
+- 监控面板：独立工具 `gks-dashboard`（`cmd/dashboard`）周期拉取 `/metrics`，用网页展示累计量、
+  窗口速率、四张折线图与派生指标；页面与静态资源全部内嵌进二进制，可单文件分发。
 - 运行：panic 隔离、SIGTERM/SIGINT 退出。
 
 **未实现**
@@ -48,6 +50,7 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
 # 1) 构建
 go build -o bin/server ./cmd/server
 go build -o bin/client ./cmd/client
+go build -o bin/dashboard ./cmd/dashboard   # 可选：本地监控面板（单文件，页面已内嵌）
 
 # 2) 准备配置（示例里的 PSK 是占位值，必须换成真实密钥）
 cp test/gks.yaml.example gks.yaml
@@ -282,6 +285,55 @@ curl -s '127.0.0.1:12081/metrics?window=1s' | python3 -m json.tool
 sudo tcpdump -i en0 -n udp port 4000 -w kcp.pcap   # 交给 Wireshark IO Graph 或 capinfos
 ```
 
+## 监控面板（gks-dashboard）
+
+`cmd/dashboard` 是一个**与 gks 完全解耦**的只读面板：它不读 gks 的配置、不共享进程，只周期拉取
+`/metrics`；gks 起停随意，拉不到数据时面板继续重试并在页面上标红。
+
+```bash
+go build -o bin/dashboard ./cmd/dashboard
+./bin/dashboard                                   # 拉 127.0.0.1:12081，监听 0.0.0.0:12080
+./bin/dashboard -pull 127.0.0.1:12082 -listen 127.0.0.1:12080 -interval 2s
+# 浏览器打开 http://127.0.0.1:12080/
+```
+
+页面与静态资源（HTML/CSS/JS）全部用 `go:embed` 打进二进制，**单文件即可分发**：把它拷到任何机器上
+直接运行即可，不依赖工作目录里的任何文件。
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-listen` | `0.0.0.0:12080` | 面板 HTTP 监听地址（TCP）。与 gks 服务端的 UDP `12080` 不冲突 |
+| `-pull` | `127.0.0.1:12081` | 上游 gks 统计端点；可写 `host:port`，也可写完整 URL（缺路径自动补 `/metrics`） |
+| `-interval` | `1s` | 拉取间隔 |
+| `-window` | = `-interval` | 传给上游的速率窗口 `?window=` |
+| `-timeout` | `3s` | 单次拉取超时 |
+| `-refresh` | `2s` | 页面局部刷新间隔（`0` = 只渲染首屏，不注入刷新脚本） |
+| `-history` | `300` | 保留的采样点数，也是趋势图最多画出的点数 |
+| `-log-level` | `info` | 日志级别（写 stderr，只在「上游恢复/断开」等状态迁移时输出） |
+
+页面内容：
+
+- **状态条**：上游角色、运行时长、最近成功时间与陈旧度、可达徽标（不可达标红）、schema 版本。
+- **累计数据**：载荷上/下行、线上/下行（UDP）、会话与流的活跃/累计、错误累计。
+- **窗口速率**：载荷与线的实时上下行、重传率、FEC 恢复/失败。
+- **派生指标**：链路开销比（线/载荷）、平均载荷速率、每会话平均流数、错误密度（每千条流）、
+  FEC 恢复成功率、上游陈旧度。
+- **四张折线图**：① 上行（载荷 vs 线，两条线同图看开销）② 下行（同）③ 重传率 ④ 错误率（每千条流，
+  由面板对累计量做窗口差分）。SVG 由 Go 生成，首次渲染即可见（无 JS 也能看数据）。
+- **明细表**：链路窗口/累计段数、会话池（仅客户端）、四类错误累计；并转发上游 `alarms`。
+
+HTTP 路由：
+
+| 路由 | 说明 |
+| --- | --- |
+| `GET /` | 完整页面（首屏服务端渲染） |
+| `GET /partial` | 只返回内容片段；页面内 JS 每 `-refresh` 替换一次，避免整页刷新闪烁 |
+| `GET /api/state` | 面板状态 + 上游最近 payload + 历史序列（JSON，`schema_version` 面板独立维护） |
+| `GET /healthz` | 面板存活；body 里带上游可达性与陈旧度（上游挂了这里仍是 200） |
+| `GET /static/*` | 内嵌的 css/js |
+
+注意：面板**无鉴权**，默认监听 `0.0.0.0`；对外暴露前请自行加防火墙或反向代理。
+
 ## 常见问题
 
 | 现象 | 排查方向 |
@@ -297,6 +349,9 @@ sudo tcpdump -i en0 -n udp port 4000 -w kcp.pcap   # 交给 Wireshark IO Graph �
 | 终端里什么都看不到 | 日志只写 `log.file`（留空即丢弃），控制台只有统计表格；`-no-console` + 空 `log.file` 就是**完全静默**，这是预期行为 |
 | `curl 127.0.0.1:12081/metrics` 连不上 | 端点被写成空串关了、端口写错、或程序没起来；看日志里的 `metrics_listen` 字段 |
 | `rate_available: false` | 启动时间不足一个 `metrics_interval`，历史还没攒够一个完整窗口；等一个周期再拉，或把 `?window=` 调小 |
+| 面板页面显示「上游不可达」 | gks 没在跑、`-pull` 指错端口、或端点被 `metrics.listen: ""` 关了；面板会一直重试，gks 起来后自动恢复 |
+| 面板折线图只有「暂无数据」 | 面板刚启动（不足两个采样点），或重传率因窗口发送段 < 20 被上游标为 n/a；等几个周期即可 |
+| 面板端口被占 | 改 `-listen`（默认 TCP 12080，与 gks 服务端的 UDP 12080 不冲突，但可能被别的程序占用） |
 
 ## 测试
 
@@ -311,7 +366,8 @@ go vet ./...
 大块分帧重组与半关闭、RST 传播、接收缓冲满时重置该流、会话池（预热/复用/排队/回收/重建/失效摘除/
 服务端重启恢复）、5 次串行请求只建立 1 条会话、速率窗口与环形历史（1s~10m 边界、历史不足）、
 表格渲染（列宽对齐、TTY/非 TTY、告警判据）、`/metrics`·`/healthz` 的 JSON 契约与参数校验、
-日志文件（自动建目录、追加、级别过滤、空值丢弃）。
+日志文件（自动建目录、追加、级别过滤、空值丢弃）、面板（拉取成功/失败/上游恢复/schema 不匹配、
+样本环裁剪与窗口差分、派生指标除零保护、SVG 生成含空数据与断点、页面与 `/api/state` 契约）。
 
 一键验收（自动挑空闲端口、生成随机 PSK、起本地目标、验证统计端点与错误码）：
 
@@ -325,7 +381,8 @@ go vet ./...
 gks/
 ├── cmd/
 │   ├── client/         # 本地 SOCKS5 监听 → KCP 隧道
-│   └── server/         # 接受 KCP 会话 → 拨号目标并转发
+│   ├── server/         # 接受 KCP 会话 → 拨号目标并转发
+│   └── dashboard/      # 独立监控面板：拉取 /metrics 并展示网页
 ├── internal/
 │   ├── protocol/       # 帧编解码、地址/CONNECT 编解码、AEAD/HKDF/nonce、AUTH 与重放缓存
 │   ├── mux/            # Session（读循环/单写循环/心跳/流表）、Stream、半关闭转发
@@ -335,6 +392,7 @@ gks/
 │   ├── config/         # 三段式配置与严格校验
 │   ├── metrics/        # 计数器、1s 粒度速率历史、控制台表格与 HTTP JSON 呈现
 │   ├── monitor/        # 采样/表格/HTTP 端点的生命周期接线
+│   ├── dashboard/      # 面板：拉取器、样本环、SVG 折线图、内嵌页面
 │   └── log/            # slog 封装、字段规范与日志文件管理
 └── test/
     ├── gks.yaml.example

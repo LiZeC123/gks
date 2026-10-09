@@ -1,0 +1,115 @@
+{{define "page"}}<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gks 监控面板</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>gks 监控面板 <span class="sub">gks-dashboard</span></h1>
+  <div class="meta">
+    <span>拉取 <code>{{.PullURL}}</code></span>
+    <span>监听 <code>{{.Listen}}</code></span>
+    <span>间隔 <b>{{.Interval}}</b></span>
+    <span>样本 <b>{{.SampleCount}}/{{.Capacity}}</b></span>
+    <span class="muted">静态资源已内嵌，无外部依赖</span>
+  </div>
+</header>
+<div id="conn-warn" class="notice warn" hidden>局部刷新失败（面板仍在运行，会自动重试）。</div>
+<main id="content">{{template "content" .}}</main>
+<footer>数据来自 gks 的 <code>/metrics</code> 端点 · 面板无鉴权，请勿直接暴露到公网</footer>
+{{if gt .RefreshMS 0}}<script src="/static/app.js" data-refresh-ms="{{.RefreshMS}}"></script>{{end}}
+</body>
+</html>{{end}}
+
+{{define "content"}}
+<section class="status {{if .Reachable}}ok{{else}}bad{{end}}">
+  <span class="pill">{{if .Reachable}}上游可达{{else}}上游不可达{{end}}</span>
+  <span>角色 <b>{{if .Role}}{{.Role}}{{else}}—{{end}}</b></span>
+  <span>上游运行 <b>{{uptime .M.UptimeSeconds}}</b></span>
+  <span>上游启动于 <b>{{ts .M.StartedAt}}</b></span>
+  <span>最近成功 <b>{{ts .LastSuccess}}</b>{{if .StaleText}} <i class="muted">{{.StaleText}}前</i>{{end}}</span>
+  <span>schema <b>v{{.M.SchemaVersion}}</b></span>
+  <span class="muted">生成于 {{ts .GeneratedAt}}</span>
+</section>
+
+{{if .SchemaWarn}}<div class="notice warn">{{.SchemaWarn}}</div>{{end}}
+{{if not .HasData}}<div class="notice warn">尚未从上游取到数据{{if .LastError}}：<code>{{.LastError}}</code>{{end}}</div>{{end}}
+{{if or .Alarms .UpstreamAlarms}}
+<div class="notice alarms">
+  {{range .Alarms}}<span class="alarm">{{.}}</span>{{end}}
+  {{range .UpstreamAlarms}}<span class="alarm up">上游 · {{.}}</span>{{end}}
+</div>
+{{end}}
+
+<h2>累计数据 <span class="muted">进程启动至今</span></h2>
+<div class="cards">
+  <div class="card"><div class="k">载荷上行累计</div><div class="v">{{humanBytes .M.Payload.SentTotal}}</div></div>
+  <div class="card"><div class="k">载荷下行累计</div><div class="v">{{humanBytes .M.Payload.RecvTotal}}</div></div>
+  <div class="card"><div class="k">线上行累计（UDP）</div><div class="v">{{humanBytes .M.Wire.SentTotal}}</div></div>
+  <div class="card"><div class="k">线下行累计（UDP）</div><div class="v">{{humanBytes .M.Wire.RecvTotal}}</div></div>
+  <div class="card"><div class="k">会话 活跃 / 累计</div><div class="v">{{int64v .M.Sessions.Active}} / {{count .M.Sessions.Total}}</div></div>
+  <div class="card"><div class="k">流 活跃 / 累计</div><div class="v">{{int64v .M.Streams.Active}} / {{count .M.Streams.Total}}</div></div>
+  <div class="card"><div class="k">错误累计（四类合计）</div><div class="v">{{count .TotalErrors}}</div></div>
+</div>
+
+<h2>窗口速率 <span class="muted">上游 {{dursec .M.RateWindowSeconds}} 窗口</span></h2>
+<div class="cards">
+  <div class="card"><div class="k">载荷上行</div><div class="v">{{humanRate .M.Payload.SentBps}}</div></div>
+  <div class="card"><div class="k">载荷下行</div><div class="v">{{humanRate .M.Payload.RecvBps}}</div></div>
+  <div class="card"><div class="k">线上行（UDP）</div><div class="v">{{humanRate .M.Wire.SentBps}}</div></div>
+  <div class="card"><div class="k">线下行（UDP）</div><div class="v">{{humanRate .M.Wire.RecvBps}}</div></div>
+  <div class="card"><div class="k">重传率</div><div class="v">{{pct .M.Link.Window.RetransRatio}}</div><div class="s">窗口发送段 {{countPtr .M.Link.Window.OutSegs}}</div></div>
+  <div class="card"><div class="k">FEC 恢复 / 失败</div><div class="v">{{countPtr .M.Link.Window.FECRecovered}} / {{countPtr .M.Link.Window.FECErrs}}</div></div>
+</div>
+
+<h2>派生指标</h2>
+<div class="cards">
+  <div class="card"><div class="k">链路开销比（线 / 载荷）</div><div class="v">{{ratio3 .Derived.WirePayloadRatio}}</div><div class="s">越接近 1 越好</div></div>
+  <div class="card"><div class="k">平均载荷速率（上下行合计）</div><div class="v">{{humanRate .Derived.AvgPayloadBps}}</div></div>
+  <div class="card"><div class="k">每会话平均流数</div><div class="v">{{plain2 .Derived.StreamsPerSession}}</div><div class="s">当前形态理想值 ≈ 1</div></div>
+  <div class="card"><div class="k">错误密度（每千条流）</div><div class="v">{{plain2 .Derived.ErrorsPer1kStreams}}</div></div>
+  <div class="card"><div class="k">FEC 恢复成功率</div><div class="v">{{pct .Derived.FECSuccessRatio}}</div><div class="s">窗口内 recovered/(recovered+errs)</div></div>
+  <div class="card"><div class="k">上游陈旧度</div><div class="v">{{stale .Derived.StaleSeconds}}</div></div>
+</div>
+
+<h2>趋势 <span class="muted">最近 {{.SampleCount}} 个采样点</span></h2>
+{{range .Charts}}
+<section class="chart-box">
+  <h3>{{.Title}}</h3>
+  {{if .Note}}<p class="note">{{.Note}}</p>{{end}}
+  <div class="legend">{{range .Legend}}<span><i style="background:{{.Color}}"></i>{{.Name}}</span>{{end}}</div>
+  {{.SVG}}
+</section>
+{{end}}
+
+<h2>链路明细</h2>
+<table>
+  <thead><tr><th>指标</th><th>窗口</th><th>累计</th></tr></thead>
+  <tbody>
+    <tr><td>发出段 out_segs</td><td>{{countPtr .M.Link.Window.OutSegs}}</td><td>{{count .M.Link.OutSegsTotal}}</td></tr>
+    <tr><td>收到段 in_segs</td><td>—</td><td>{{count .M.Link.InSegsTotal}}</td></tr>
+    <tr><td>重传段 retrans_segs</td><td>—</td><td>{{count .M.Link.RetransSegsTotal}}</td></tr>
+    <tr><td>快速重传 fast_retrans_segs</td><td>—</td><td>{{count .M.Link.FastRetransSegsTotal}}</td></tr>
+    <tr><td>RTO 超时 lost_segs</td><td>{{countPtr .M.Link.Window.LostSegs}}</td><td>—</td></tr>
+    <tr><td>对端重复段 repeat_segs</td><td>{{countPtr .M.Link.Window.RepeatSegs}}</td><td>—</td></tr>
+    <tr><td>KCP 输入错误 kcp_in_errors</td><td>{{countPtr .M.Link.Window.KCPInErrors}}</td><td>—</td></tr>
+  </tbody>
+</table>
+
+{{if .M.Pool.Available}}
+<h2>会话池</h2>
+<table>
+  <thead><tr><th>使用中</th><th>空闲</th><th>建立中</th><th>排队等待</th><th>重建次数</th></tr></thead>
+  <tbody><tr><td>{{intv .M.Pool.InUse}}</td><td>{{intv .M.Pool.Idle}}</td><td>{{intv .M.Pool.Creating}}</td><td>{{intv .M.Pool.Waiters}}</td><td>{{count .M.Pool.Rebuilds}}</td></tr></tbody>
+</table>
+{{end}}
+
+<h2>错误累计</h2>
+<table>
+  <thead><tr><th>认证失败</th><th>建会话失败</th><th>本地 SOCKS5 失败</th><th>目标拨号失败</th><th>合计</th></tr></thead>
+  <tbody><tr><td>{{count .M.Errors.Auth}}</td><td>{{count .M.Errors.Session}}</td><td>{{count .M.Errors.Socks5}}</td><td>{{count .M.Errors.Dial}}</td><td>{{count .TotalErrors}}</td></tr></tbody>
+</table>
+{{end}}
