@@ -69,7 +69,7 @@ sed -i.bak "s|^  psk: .*|  psk: \"$PSK\"|" gks.yaml && rm -f gks.yaml.bak
 同机联调必须错开，两机部署可以都用 `12081`）：
 
 ```bash
-curl -s 127.0.0.1:12081/metrics | python3 -m json.tool      # 客户端统计（默认 10s 窗口）
+curl -s 127.0.0.1:12081/metrics | python3 -m json.tool      # 客户端统计（窗口 = metrics_interval，示例 1s）
 curl -s '127.0.0.1:12082/metrics?window=1s'                  # 服务端统计（1s 窗口）
 ./bin/client -c gks.yaml -no-console &                       # 只要端点、不要控制台表格
 ```
@@ -140,11 +140,11 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `common.stream.idle_timeout` | `600s` | 流长时间无数据则 RST |
 | `common.limits.max_streams_per_session` | `256` | 单会话开流上限 |
 | `common.limits.max_frame_body` / `max_data_payload` | `65536` / `16384` | 帧体上限 / 单帧载荷上限（发送方据此拆帧） |
-| `common.metrics_interval` | `10s` | 控制台表格刷新周期 + `/metrics` 默认速率窗口；必须 > 0 且 ≤ `10m` |
+| `common.metrics_interval` | `1s` | 控制台表格刷新周期 + `/metrics` 默认速率窗口；必须 > 0 且 ≤ `10m` |
 | `client.listen` | `127.0.0.1:2080` | 本地 SOCKS5 监听 |
 | `client.socks5.handshake_timeout` | `10s` | 本地协商 + 请求解析 |
 | `client.socks5.connect_timeout` | `10s` | 等待服务端 `CONNECT_RESP` |
-| `client.pool.size` | `2` | 保底（热）会话数，1~16 |
+| `client.pool.size` | `12` | 保底（热）会话数，1~16 |
 | `client.pool.max_sessions` | `64` | **并发连接上限**，1~128；超出排队 |
 | `client.pool.idle_timeout` | `300s` | 空闲会话回收（只回收超出 `size` 的部分） |
 | `client.pool.startup_jitter` | `300ms` | 启动错峰 |
@@ -166,10 +166,10 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 
 ### 控制台表格
 
-启动后每 `common.metrics_interval`（默认 10s）刷新一次：
+启动后每 `common.metrics_interval` 刷新一次（示例配置为 1s）：
 
 ```text
-gks client · 运行 1h02m03s · 窗口 10s · 2025-10-09 13:02:01
+gks client · 运行 1h02m03s · 窗口 1s · 2025-10-09 13:02:01
 ┌────────────┬────────────────────┬──────────────────┐
 │ 会话/流    │ sessions           │ 2                │
 │            │ streams            │ 1                │
@@ -193,6 +193,9 @@ gks client · 运行 1h02m03s · 窗口 10s · 2025-10-09 13:02:01
 - 表格写 stdout。`-no-console`（等价 `--no-console`）关闭表格；配合 `log.file: ""`
   就是**完全静默**：进程不产生任何输出。
 - 启动初期历史不足一个窗口时，速率与增量列显示 `n/a`，此时会多一行提示；攒够窗口后自动消失。
+- 刷新周期就是 `metrics_interval`。**输出被重定向到文件时每个周期会追加一份表格**，周期太短会把
+  日志撑大（1s 约每天 340 万行）：往文件里留档时建议调到 `10s` 以上，或者干脆用 `-no-console`
+  只保留 `/metrics` 端点。
 - 分组顺序固定：会话/流 → 载荷速率 → 线速率 → 累计量 → 链路质量 → 会话池（仅客户端）→ 错误；
   末行固定为 `[告警]`（无异常显示 `[告警] 无`）。告警判据：`pool_waiters > 0`、
   `retrans > 1%`（发送段 ≥ 20 时）、`fec_errs > 0`、`kcp_in_errors > 0`。
@@ -271,7 +274,7 @@ curl -s '127.0.0.1:12081/metrics?window=1s' | python3 -m json.tool
 
 - **链路干净 → 关掉 FEC**（`data_shards: 0` / `parity_shards: 0`）：省掉约 30% 流量。
 - **链路丢包 → 看 `fec_recovered` 与 `repeat_segs`**：恢复量远小于超时事件数说明冗余不足（10/3 → 10/6 或更重），此时也可把 `interval` 提到 20ms 减少包数。
-- **首屏慢**：先把 `pool.size` 提到接近日常并发（如 16~24），让首屏连接都能命中热会话，避免在关键路径上做 AUTH。
+- **首屏慢**：先把 `pool.size` 提到接近日常并发（示例给 12，日常并发更高可提到 16~24），让首屏连接都能命中热会话，避免在关键路径上做 AUTH。
 - **并发被挡**：`pool_waiters > 0` 就调大 `max_sessions`；它同时是客户端 UDP socket 数量，注意 `ulimit -n`。
 - 需要精确的线速率、包长分布、丢包比例时，用抓包：
 
