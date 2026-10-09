@@ -1,37 +1,10 @@
 package metrics
 
 import (
-	"bytes"
-	"context"
-	"io"
-	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 )
-
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-}
-
-// syncBuffer 是并发安全的日志缓冲（Run 在另一个 goroutine 里写）。
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
 
 func TestHumanRate(t *testing.T) {
 	cases := []struct {
@@ -105,7 +78,7 @@ func TestRegistryTake(t *testing.T) {
 	}
 }
 
-func TestSamplerRates(t *testing.T) {
+func TestComputeSampleRates(t *testing.T) {
 	reg := &Registry{}
 	reg.PayloadSent.Add(1000)
 	reg.PayloadReceived.Add(500)
@@ -122,23 +95,13 @@ func TestSamplerRates(t *testing.T) {
 		FECRecovered:     100,
 		FECErrs:          1,
 	}
-	var cur TransportStats
-	s := NewSampler(reg, time.Second, discardLogger(), Sources{Transport: func() TransportStats { return cur }})
-	cur = transport
-
 	t0 := time.Unix(1700000000, 0)
-	first := s.sampleAt(t0)
-	if first.Interval != 0 || first.PayloadSentBps != 0 || first.WireSentBps != 0 {
-		t.Fatalf("首次采样应无速率: %+v", first)
-	}
-	if first.Current.Registry.PayloadSent != 1000 {
-		t.Fatalf("首次快照应含当时计数: %+v", first.Current.Registry)
-	}
+	prev := reg.Take(transport, PoolStats{}, t0)
 
 	// 2 秒后：载荷 +2048/+1024，UDP +10MB/+5MB，段 +200/+100，重传 +20/丢包 +6/重复 +3
 	reg.PayloadSent.Add(2048)
 	reg.PayloadReceived.Add(1024)
-	cur = TransportStats{
+	cur := reg.Take(TransportStats{
 		UDPBytesSent:     10_000 + 10*1024*1024,
 		UDPBytesReceived: 20_000 + 5*1024*1024,
 		OutSegs:          1_000 + 200,
@@ -149,8 +112,9 @@ func TestSamplerRates(t *testing.T) {
 		KCPInErrors:      1 + 1,
 		FECRecovered:     100 + 40,
 		FECErrs:          1 + 2,
-	}
-	second := s.sampleAt(t0.Add(2 * time.Second))
+	}, PoolStats{}, t0.Add(2*time.Second))
+
+	second := computeSample(prev, cur)
 
 	if second.Interval != 2*time.Second {
 		t.Fatalf("间隔 = %s", second.Interval)
@@ -178,109 +142,53 @@ func TestSamplerRates(t *testing.T) {
 	}
 }
 
-func TestSamplerZeroIntervalSample(t *testing.T) {
+func TestComputeSampleZeroInterval(t *testing.T) {
 	reg := &Registry{}
 	reg.PayloadSent.Add(100)
 	cur := TransportStats{UDPBytesSent: 1000, OutSegs: 10}
-	s := NewSampler(reg, time.Second, discardLogger(), Sources{Transport: func() TransportStats { return cur }})
 	now := time.Unix(1700000000, 0)
-	_ = s.sampleAt(now)
+	prev := reg.Take(cur, PoolStats{}, now)
 	reg.PayloadSent.Add(100)
 	cur = TransportStats{UDPBytesSent: 2000, OutSegs: 20}
-	smp := s.sampleAt(now) // 同一时刻
+
+	smp := computeSample(prev, reg.Take(cur, PoolStats{}, now))
 	if smp.Interval != 0 || smp.PayloadSentBps != 0 || smp.RetransRate != 0 {
 		t.Fatalf("零间隔应无速率: %+v", smp)
 	}
 }
 
-func TestSamplerHandlesCounterReset(t *testing.T) {
+func TestComputeSampleHandlesCounterReset(t *testing.T) {
 	reg := &Registry{}
 	reg.PayloadSent.Add(1000)
 	cur := TransportStats{UDPBytesSent: 5000, OutSegs: 100, RetransSegs: 5}
-	s := NewSampler(reg, time.Second, discardLogger(), Sources{Transport: func() TransportStats { return cur }})
 	now := time.Unix(1700000000, 0)
-	_ = s.sampleAt(now)
+	prev := reg.Take(cur, PoolStats{}, now)
 
 	// 计数器回退（例如对端重启导致 Snmp 重置）：增量应为 0 而不是负数。
 	reg.PayloadSent.Store(10)
-	cur = TransportStats{UDPBytesSent: 1, OutSegs: 1, RetransSegs: 0}
-	smp := s.sampleAt(now.Add(time.Second))
+	smp := computeSample(prev, reg.Take(TransportStats{UDPBytesSent: 1, OutSegs: 1}, PoolStats{}, now.Add(time.Second)))
 	if smp.PayloadSentBps != 0 || smp.WireSentBps != 0 || smp.RetransRate != 0 {
 		t.Fatalf("计数器回退时应为 0: %+v", smp)
 	}
 }
 
-func TestSamplerRetransRateWithoutOutSegs(t *testing.T) {
+func TestComputeSampleRetransRateWithoutOutSegs(t *testing.T) {
 	reg := &Registry{}
-	s := NewSampler(reg, time.Second, discardLogger(), Sources{})
 	now := time.Unix(1700000000, 0)
-	_ = s.sampleAt(now)
-	smp := s.sampleAt(now.Add(time.Second))
+	prev := reg.Take(TransportStats{}, PoolStats{}, now)
+	smp := computeSample(prev, reg.Take(TransportStats{}, PoolStats{}, now.Add(time.Second)))
 	if smp.RetransRate != 0 {
 		t.Fatalf("无发送段时重传率应为 0，实际 %v", smp.RetransRate)
 	}
 }
 
-func TestSamplerRunLogsAndStops(t *testing.T) {
-	reg := &Registry{}
-	reg.SessionsActive.Add(2)
-	reg.StreamsActive.Add(5)
-
-	var buf syncBuffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	s := NewSampler(reg, 20*time.Millisecond, logger, Sources{
-		Transport: func() TransportStats { return TransportStats{UDPBytesSent: 1024, OutSegs: 10} },
-		Pool:      func() PoolStats { return PoolStats{Sessions: 2, InUse: 1, Idle: 1, Waiters: 3, Rebuilds: 7} },
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		s.Run(ctx)
-		close(done)
-	}()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Count(buf.String(), "event=metrics") >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+func TestRetransText(t *testing.T) {
+	if got := retransText(Sample{OutSegsDelta: 10, RetransRate: 0.5}); got != "n/a" {
+		t.Fatalf("小样本应显示 n/a，实际 %q", got)
 	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run 未在 ctx 取消后退出")
+	if got := retransText(Sample{OutSegsDelta: 100, RetransRate: 0.5}); got != "50.00%" {
+		t.Fatalf("重传率文本 = %q", got)
 	}
-
-	out := buf.String()
-	if !strings.Contains(out, "event=metrics") {
-		t.Fatalf("未见统计日志: %s", out)
-	}
-	for _, want := range []string{"sessions=2", "streams=5", "payload_sent=", "wire_sent=", "retrans=",
-		"payload_recv_total=", "wire_recv_total=", "fec_recovered=", "fec_errs=",
-		"pool_in_use=1", "pool_idle=1", "pool_waiters=3", "pool_rebuilds=7", "auth=0 session="} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("日志缺少 %q: %s", want, out)
-		}
-	}
-}
-
-func TestSamplerRunDisabled(t *testing.T) {
-	s := NewSampler(nil, 0, discardLogger(), Sources{})
-	done := make(chan struct{})
-	go func() {
-		s.Run(context.Background())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("interval=0 时 Run 应立即返回")
-	}
-	// nil 依赖也要能安全地采样与打日志。
-	s.Log(s.Sample())
 }
 
 func TestRegistryConcurrentUpdates(t *testing.T) {

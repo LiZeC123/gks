@@ -118,6 +118,18 @@ func TestExampleConfigIsValid(t *testing.T) {
 		t.Fatalf("server log level = %q", cfg.Server.Log.LevelOrDefault())
 	}
 
+	// 统计端点：示例里两端显式错开端口（同机联调需要）。
+	if addr, enabled := cfg.Client.Metrics.Addr(); !enabled || addr != "127.0.0.1:12081" {
+		t.Fatalf("client.metrics.listen = %q（enabled=%v）", addr, enabled)
+	}
+	if addr, enabled := cfg.Server.Metrics.Addr(); !enabled || addr != "127.0.0.1:12082" {
+		t.Fatalf("server.metrics.listen = %q（enabled=%v）", addr, enabled)
+	}
+	// 日志文件：示例默认不写文件。
+	if cfg.Client.Log.File != "" || cfg.Server.Log.File != "" {
+		t.Fatalf("示例的 log.file 应为空: %q / %q", cfg.Client.Log.File, cfg.Server.Log.File)
+	}
+
 	psk, err := cfg.Common.PSKBytes()
 	if err != nil {
 		t.Fatalf("common PSK: %v", err)
@@ -487,5 +499,80 @@ func TestLoadKeepsCommonFieldsSingleCopy(t *testing.T) {
 	}
 	if first.Common.KCP != second.Common.KCP || first.Common.Limits != second.Common.Limits {
 		t.Fatal("common 段读取结果不一致")
+	}
+}
+
+func TestMetricsAddrResolution(t *testing.T) {
+	// 没写 metrics.listen → 默认 127.0.0.1:12081，且启用。
+	addr, enabled := Metrics{}.Addr()
+	if !enabled || addr != DefaultMetricsListen {
+		t.Fatalf("未配置时应走默认地址 %q（enabled=%v）", DefaultMetricsListen, enabled)
+	}
+	// 显式写空 → 关闭端点。
+	empty := ""
+	if addr, enabled := (Metrics{Listen: &empty}).Addr(); enabled || addr != "" {
+		t.Fatalf("显式空串应关闭端点，实际 %q（enabled=%v）", addr, enabled)
+	}
+	// 自定义地址。
+	custom := "127.0.0.1:5555"
+	if addr, enabled := (Metrics{Listen: &custom}).Addr(); !enabled || addr != custom {
+		t.Fatalf("自定义地址解析错误: %q（enabled=%v）", addr, enabled)
+	}
+}
+
+func TestMetricsValidate(t *testing.T) {
+	bad := "127.0.0.1"
+	p := &problems{}
+	Metrics{Listen: &bad}.validate(p, "client.metrics")
+	err := p.err()
+	if err == nil || !strings.Contains(err.Error(), "client.metrics.listen") {
+		t.Fatalf("非法端点地址应当报错: %v", err)
+	}
+
+	// 未配置与显式空都合法。
+	ok := &problems{}
+	empty := ""
+	Metrics{}.validate(ok, "client.metrics")
+	Metrics{Listen: &empty}.validate(ok, "client.metrics")
+	if err := ok.err(); err != nil {
+		t.Fatalf("合法端点配置不应报错: %v", err)
+	}
+}
+
+func TestLogFileValidate(t *testing.T) {
+	p := &problems{}
+	validateLogFile(p, "client.log.file", "   ")
+	if err := p.err(); err == nil || !strings.Contains(err.Error(), "client.log.file") {
+		t.Fatalf("纯空白日志路径应当报错: %v", err)
+	}
+
+	ok := &problems{}
+	validateLogFile(ok, "client.log.file", "")
+	validateLogFile(ok, "server.log.file", "logs/gks.log")
+	if err := ok.err(); err != nil {
+		t.Fatalf("合法日志路径不应报错: %v", err)
+	}
+}
+
+func TestMetricsIntervalBounds(t *testing.T) {
+	for _, v := range []string{"0s", "11m"} {
+		body := strings.Replace(exampleBody(t), "metrics_interval: 10s", "metrics_interval: "+v, 1)
+		cfg, err := loadBody(t, body)
+		if err != nil {
+			t.Fatalf("解析阶段不应失败: %v", err)
+		}
+		err = cfg.Common.Validate()
+		if err == nil || !strings.Contains(err.Error(), "common.metrics_interval") {
+			t.Fatalf("metrics_interval=%s 应当报错: %v", v, err)
+		}
+	}
+	// 边界值 10m 合法。
+	body := strings.Replace(exampleBody(t), "metrics_interval: 10s", "metrics_interval: 10m", 1)
+	cfg, err := loadBody(t, body)
+	if err != nil {
+		t.Fatalf("解析阶段不应失败: %v", err)
+	}
+	if err := cfg.Common.Validate(); err != nil && strings.Contains(err.Error(), "metrics_interval") {
+		t.Fatalf("metrics_interval=10m 应当合法: %v", err)
 	}
 }

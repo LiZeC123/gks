@@ -15,6 +15,8 @@
 #      下面是示例占位值（0x00..0x1f），上线前必须替换。
 #   2. common.crypt / common.aead 同理，两端天然一致。
 #   3. 未知字段会导致启动失败（严格模式）；把 common 的字段写进 client/server 也会报错。
+#   4. 观测：日志只写 log.file（留空则不写任何日志文件）；控制台周期刷新统计表格，
+#      可用 -no-console 关闭；两端各有一个统计 HTTP 端点（GET /metrics、GET /healthz）。
 
 common:
   psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
@@ -34,7 +36,7 @@ common:
     max_streams_per_session: 256     # 客户端开流上限 = 服务端接受上限
     max_frame_body: 65536            # 超过即断开（防伪造长度挂起）
     max_data_payload: 16384          # 发送方据此拆帧
-  metrics_interval: 10s              # 传输统计采样间隔（B/s、线速率、重传率），0 = 关闭
+  metrics_interval: 1s               # 控制台表格刷新周期 + /metrics 默认速率窗口（>0，上限 10m）
 
 client:
   listen: "127.0.0.1:2080"           # 本地 SOCKS5 TCP 监听
@@ -45,7 +47,7 @@ client:
     handshake_timeout: 10s           # 方法协商 + 请求解析
     connect_timeout: 10s             # 等待服务端 CONNECT_RESP
   pool:
-    size: 2                          # 初始/保底 Session 数
+    size: 12                         # 初始/保底 Session 数
     max_sessions: 64                 # Session 数硬上限 = 并发连接上限（每条会话同时 1 条流）
     idle_timeout: 300s               # 空闲 Session 回收
     startup_jitter: 300ms            # 启动错峰：相邻 Session 建立间隔随机
@@ -58,8 +60,15 @@ client:
     heartbeat_miss: 3                # 连续未收到 PONG 的次数上限
     auth_timeout: 5s                 # 等待 AUTH_RESP
   shutdown_grace: 30s
+  metrics:
+    listen: "127.0.0.1:12081"        # 统计 HTTP 端点（GET /metrics、GET /healthz）
+                                     #   不写 = 默认 127.0.0.1:12081；显式写 "" = 关闭端点
+                                     #   同机同时跑两端时必须错开端口（这里服务端用 12082）
   log:
     level: "info"                    # debug | info | warn | error
+    file: ""                         # 日志文件；空 = 不写任何日志文件
+                                     #   父目录不存在会自动创建，例：file: "logs/client.log"
+                                     #   日志只写文件，控制台留给统计表格
 
 server:
   listen: "127.0.0.1:4000"           # KCP/UDP 监听
@@ -72,5 +81,8 @@ server:
     timeout: 10s
     keepalive: 30s
   shutdown_grace: 30s
+  metrics:
+    listen: "127.0.0.1:12082"        # 见 client.metrics.listen；两机部署时两端可都用 12081
   log:
     level: "info"
+    file: ""

@@ -1,24 +1,21 @@
-// Package metrics 提供进程级计数器与周期采样，用于观察 gks 的传输速率与运行状态。
+// Package metrics 提供进程级计数器、1s 粒度速率历史与统计呈现（控制台表格 / HTTP JSON）。
 //
 // 三层数据来源：
 //
 //   - 流/会话层：本包的 Registry，由 mux 层累加（载荷字节、活跃会话/流数）；
 //   - 传输层：kcp-go 的全局 Snmp（UDP 字节、KCP 段、重传/丢包），
-//     由调用方通过 Sampler 的 transport hook 注入，本包不依赖 kcp-go；
+//     由调用方通过 Sources 的 transport hook 注入，本包不依赖 kcp-go；
 //   - 错误计数：认证失败、会话建立失败、SOCKS5 失败、目标拨号失败。
 //
-// 速率是「两次采样之间的增量 ÷ 间隔」，因此需要连续两次 Sample 才有意义。
+// 速率是「窗口两端的累计量之差 ÷ 窗口长度」：Collector 把快照按 Resolution(1s) 写入
+// 环形历史，任意窗口（1s ~ Retention）内的速率都由历史两端即时算出，因此外部程序
+// 按 1s 或 30s 拉取都能拿到对应窗口的真实值。
 package metrics
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
-	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/LiZeC123/gks/internal/log"
 )
 
 // Registry 是进程级计数器。全部字段使用原子操作，可被多个 goroutine 并发更新。
@@ -117,7 +114,7 @@ func (r *Registry) Take(transport TransportStats, pool PoolStats, now time.Time)
 	}
 }
 
-// Sample 是两次采样之间的速率与增量。
+// Sample 是一个窗口内的速率与增量（窗口两端 = Current 与窗口起点）。
 type Sample struct {
 	Interval time.Duration
 	Current  Snapshot
@@ -145,54 +142,10 @@ type Sources struct {
 	Pool      func() PoolStats
 }
 
-// Sampler 周期性地采集快照并计算速率。
-type Sampler struct {
-	reg       *Registry
-	transport func() TransportStats
-	pool      func() PoolStats
-	interval  time.Duration
-	logger    *slog.Logger
-
-	mu   sync.Mutex
-	prev *Snapshot
-}
-
-// NewSampler 构造采样器。
-func NewSampler(reg *Registry, interval time.Duration, logger *slog.Logger, src Sources) *Sampler {
-	if reg == nil {
-		reg = Default
-	}
-	if src.Transport == nil {
-		src.Transport = func() TransportStats { return TransportStats{} }
-	}
-	if src.Pool == nil {
-		src.Pool = func() PoolStats { return PoolStats{} }
-	}
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Sampler{reg: reg, interval: interval, logger: logger, transport: src.Transport, pool: src.Pool}
-}
-
-// Interval 返回采样间隔。
-func (s *Sampler) Interval() time.Duration { return s.interval }
-
-// Sample 用当前时间采一次样并计算速率。
-func (s *Sampler) Sample() Sample { return s.sampleAt(time.Now()) }
-
-func (s *Sampler) sampleAt(now time.Time) Sample {
-	cur := s.reg.Take(s.transport(), s.pool(), now)
-
-	s.mu.Lock()
-	prev := s.prev
-	s.prev = &cur
-	s.mu.Unlock()
-
+// computeSample 计算 prev → cur 之间的速率与增量。它是纯函数，便于单测；
+// 窗口的选取（历史环形缓冲）由 Collector 负责。
+func computeSample(prev, cur Snapshot) Sample {
 	smp := Sample{Current: cur}
-	if prev == nil {
-		// 首次采样没有基准，速率与增量都为 0。
-		return smp
-	}
 	smp.Interval = cur.At.Sub(prev.At)
 	if smp.Interval <= 0 {
 		return smp
@@ -215,62 +168,12 @@ func (s *Sampler) sampleAt(now time.Time) Sample {
 	return smp
 }
 
-// Run 阻塞直到 ctx 结束，每 interval 记录一行统计；interval <= 0 时直接返回。
-func (s *Sampler) Run(ctx context.Context) {
-	if s.interval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.Log(s.Sample())
-		}
-	}
-}
-
-// Log 把一次采样结果打成一行结构化日志。
-func (s *Sampler) Log(smp Sample) {
-	r := smp.Current.Registry
-	s.logger.Info("传输统计",
-		log.Event, "metrics",
-		"interval", smp.Interval.String(),
-		"sessions", r.SessionsActive,
-		"streams", r.StreamsActive,
-		"sessions_total", r.SessionsTotal,
-		"streams_total", r.StreamsTotal,
-		"payload_sent", HumanRate(smp.PayloadSentBps),
-		"payload_recv", HumanRate(smp.PayloadRecvBps),
-		"wire_sent", HumanRate(smp.WireSentBps),
-		"wire_recv", HumanRate(smp.WireRecvBps),
-		"payload_sent_total", HumanBytes(float64(r.PayloadSent)),
-		"payload_recv_total", HumanBytes(float64(r.PayloadReceived)),
-		"wire_sent_total", HumanBytes(float64(smp.Current.Transport.UDPBytesSent)),
-		"wire_recv_total", HumanBytes(float64(smp.Current.Transport.UDPBytesReceived)),
-		"retrans", retransField(smp),
-		"lost_segs", smp.LostSegsDelta,
-		"repeat_segs", smp.RepeatSegsDelta,
-		"fec_recovered", smp.FECRecoveredDelta,
-		"fec_errs", smp.FECErrsDelta,
-		"kcp_in_errors", smp.KCPInErrorsDelta,
-		"pool_in_use", smp.Current.Pool.InUse,
-		"pool_idle", smp.Current.Pool.Idle,
-		"pool_creating", smp.Current.Pool.Creating,
-		"pool_waiters", smp.Current.Pool.Waiters,
-		"pool_rebuilds", smp.Current.Pool.Rebuilds,
-		"errors", fmt.Sprintf("auth=%d session=%d socks5=%d dial=%d",
-			r.AuthFailures, r.SessionDialFailures, r.Socks5Failures, r.DialFailures),
-	)
-}
-
 // minRetransSampleSegs 是计算重传率所需的最小发送段数：
 // 样本太小时（例如只发了两段、重传两段）百分比没有意义且会误导。
 const minRetransSampleSegs = 20
 
-func retransField(smp Sample) string {
+// retransText 把重传率渲染成可读文本；样本太小或没有速率时返回 n/a。
+func retransText(smp Sample) string {
 	if smp.OutSegsDelta < minRetransSampleSegs {
 		return "n/a"
 	}

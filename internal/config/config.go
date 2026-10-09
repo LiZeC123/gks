@@ -25,6 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/protocol"
 )
 
@@ -70,7 +71,8 @@ type Common struct {
 	Stream Stream `yaml:"stream"`
 	// Limits 是帧与流的上限：发送方必须遵守，接收方据此校验。
 	Limits Limits `yaml:"limits"`
-	// MetricsInterval 是传输统计的采样间隔；0 表示关闭。
+	// MetricsInterval 是控制台表格的刷新周期，同时也是端点 /metrics 不带 window 参数时的
+	// 默认速率窗口；必须大于 0 且不超过 metrics.Retention（速率历史保留时长）。
 	MetricsInterval Duration `yaml:"metrics_interval"`
 }
 
@@ -107,6 +109,7 @@ type Client struct {
 	Pool          Pool       `yaml:"pool"`
 	KCP           ClientKCP  `yaml:"kcp"`
 	ShutdownGrace Duration   `yaml:"shutdown_grace"`
+	Metrics       Metrics    `yaml:"metrics"`
 	Log           Log        `yaml:"log"`
 }
 
@@ -156,6 +159,7 @@ type Server struct {
 	Auth          ServerAuth `yaml:"auth"`
 	Dial          Dial       `yaml:"dial"`
 	ShutdownGrace Duration   `yaml:"shutdown_grace"`
+	Metrics       Metrics    `yaml:"metrics"`
 	Log           Log        `yaml:"log"`
 }
 
@@ -173,9 +177,47 @@ type Dial struct {
 	Keepalive Duration `yaml:"keepalive"`
 }
 
-// Log 是日志设置（两端可各自设置级别）。
+// Metrics 是统计 HTTP 端点的设置（client/server 各一份，两端可分别错开端口）。
+//
+// 形态：
+//
+//	metrics:
+//	  listen: "127.0.0.1:12081"   # 未配置 = DefaultMetricsListen；显式写 "" = 关闭端点
+type Metrics struct {
+	// Listen 用指针是为了区分「没写」（nil，走默认地址）与「显式写空」（关闭端点）。
+	Listen *string `yaml:"listen"`
+}
+
+// DefaultMetricsListen 是统计 HTTP 端点的默认监听地址。
+const DefaultMetricsListen = "127.0.0.1:12081"
+
+// Addr 返回端点监听地址与是否启用。未配置走默认地址，空串表示关闭。
+func (m Metrics) Addr() (string, bool) {
+	if m.Listen == nil {
+		return DefaultMetricsListen, true
+	}
+	addr := strings.TrimSpace(*m.Listen)
+	if addr == "" {
+		return "", false
+	}
+	return addr, true
+}
+
+// validate 校验端点地址（未启用时不校验）。
+func (m Metrics) validate(p *problems, prefix string) {
+	addr, enabled := m.Addr()
+	if !enabled {
+		return
+	}
+	validateAddr(p, prefix+".listen", addr, false)
+}
+
+// Log 是日志设置（两端可各自设置级别与输出文件）。
 type Log struct {
 	Level string `yaml:"level"`
+	// File 是日志文件路径；空表示不写任何日志文件（日志被丢弃）。
+	// 父目录不存在时启动会自动创建。
+	File string `yaml:"file"`
 }
 
 // 取值范围常量（dev.md §7.3）。
@@ -252,7 +294,10 @@ func (c *Common) Validate() error {
 	validateKCPTuning(p, "common.kcp", &c.KCP)
 
 	p.require(c.Stream.IdleTimeout.D() > 0, "common.stream.idle_timeout: 必须大于 0")
-	p.require(c.MetricsInterval.D() >= 0, "common.metrics_interval: 不能为负（0 表示关闭）")
+	p.require(c.MetricsInterval.D() > 0,
+		"common.metrics_interval: 必须大于 0（控制台刷新周期与端点默认速率窗口）")
+	p.require(c.MetricsInterval.D() <= metrics.Retention,
+		"common.metrics_interval: 不能超过 %s（速率历史保留时长）", metrics.Retention)
 
 	p.require(c.Limits.MaxStreamsPerSession >= 1 && c.Limits.MaxStreamsPerSession <= MaxStreamsPerSess,
 		"common.limits.max_streams_per_session: 需在 [1,%d]，实际 %d", MaxStreamsPerSess, c.Limits.MaxStreamsPerSession)
@@ -301,7 +346,9 @@ func (c *Client) Validate() error {
 	p.require(c.KCP.AuthTimeout.D() > 0, "client.kcp.auth_timeout: 必须大于 0")
 
 	p.require(c.ShutdownGrace.D() > 0, "client.shutdown_grace: 必须大于 0")
+	c.Metrics.validate(p, "client.metrics")
 	validateLevel(p, "client.log.level", c.Log.Level)
+	validateLogFile(p, "client.log.file", c.Log.File)
 	return p.err()
 }
 
@@ -319,7 +366,9 @@ func (s *Server) Validate() error {
 	p.require(s.Dial.Keepalive.D() > 0, "server.dial.keepalive: 必须大于 0")
 
 	p.require(s.ShutdownGrace.D() > 0, "server.shutdown_grace: 必须大于 0")
+	s.Metrics.validate(p, "server.metrics")
 	validateLevel(p, "server.log.level", s.Log.Level)
+	validateLogFile(p, "server.log.file", s.Log.File)
 	return p.err()
 }
 
@@ -404,6 +453,17 @@ func validateLevel(p *problems, prefix, level string) {
 	case "", "debug", "info", "warn", "error":
 	default:
 		p.add("%s: 只能是 debug|info|warn|error，实际 %q", prefix, level)
+	}
+}
+
+// validateLogFile 校验日志文件路径：空值合法（表示不写文件），但不能是纯空白。
+// 父目录是否存在、能否写入由启动时的 log.NewFromConfig 负责（失败即启动失败）。
+func validateLogFile(p *problems, prefix, file string) {
+	if file == "" {
+		return
+	}
+	if strings.TrimSpace(file) == "" {
+		p.add("%s: 不能只包含空白（空值表示不写日志文件）", prefix)
 	}
 }
 

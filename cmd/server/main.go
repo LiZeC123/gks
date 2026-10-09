@@ -2,6 +2,9 @@
 //
 // 阶段三形态（dev.md §8）：接受 KCP 会话、完成认证握手，按 CONNECT_REQ 拨号目标
 // 并双向转发（DATA/FIN/RST）。
+//
+// 观测：日志只写配置文件指定的文件（为空则丢弃），控制台留给周期刷新的统计表格；
+// 统计另经 HTTP 端点（默认 127.0.0.1:12081）以 JSON 暴露，供外部程序周期拉取。
 package main
 
 import (
@@ -17,6 +20,7 @@ import (
 	"github.com/LiZeC123/gks/internal/config"
 	"github.com/LiZeC123/gks/internal/log"
 	"github.com/LiZeC123/gks/internal/metrics"
+	"github.com/LiZeC123/gks/internal/monitor"
 	"github.com/LiZeC123/gks/internal/mux"
 	"github.com/LiZeC123/gks/internal/protocol"
 	"github.com/LiZeC123/gks/internal/server"
@@ -32,8 +36,12 @@ func main() {
 
 func run() error {
 	var cfgPath string
+	var noConsole bool
 	flag.StringVar(&cfgPath, "c", "gks.yaml", "配置文件路径")
+	flag.BoolVar(&noConsole, "no-console", false, "关闭控制台统计表格（配合空 log.file 即完全静默）")
 	flag.Parse()
+
+	startedAt := time.Now()
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -43,10 +51,13 @@ func run() error {
 		return fmt.Errorf("配置校验失败:\n%w", err)
 	}
 
-	logger, err := log.New(os.Stderr, cfg.Server.Log.Level)
+	// 日志只写文件：file 为空时全部丢弃，控制台不再出现日志。
+	logger, logCloser, err := log.NewFromConfig(cfg.Server.Log.Level, cfg.Server.Log.File)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = logCloser.Close() }()
+
 	psk, err := cfg.Common.PSKBytes()
 	if err != nil {
 		return err
@@ -74,12 +85,43 @@ func run() error {
 	}
 	defer func() { _ = tln.Close() }()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 观测：1s 粒度的速率历史 + 控制台表格 + 统计 HTTP 端点（服务端无会话池指标）。
+	collector := metrics.NewCollector(metrics.Options{
+		Interval: cfg.Common.MetricsInterval.D(),
+		Sources:  metrics.Sources{Transport: transport.SnmpStats},
+	})
+	metricsAddr, _ := cfg.Server.Metrics.Addr()
+	mon, err := monitor.Start(ctx, monitor.Options{
+		Role:       "server",
+		Collector:  collector,
+		HTTPAddr:   metricsAddr,
+		Console:    !noConsole,
+		ConsoleOut: os.Stdout,
+		StartedAt:  startedAt,
+		Logger:     logger,
+	})
+	if err != nil {
+		return err
+	}
+	defer mon.Close()
+
+	metricsListen := "disabled"
+	if addr := mon.Addr(); addr != "" {
+		metricsListen = addr
+	}
 	logger.Info("gks 服务端已启动",
 		log.Event, "server_start",
 		"listen", tln.Addr().String(),
 		"crypt", cfg.Common.CryptName(),
 		"aead", cfg.Common.AEADName(),
 		"dial_timeout", cfg.Server.Dial.Timeout.D().String(),
+		"metrics_listen", metricsListen,
+		"metrics_interval", cfg.Common.MetricsInterval.D().String(),
+		"log_file", cfg.Server.Log.File,
+		"console", !noConsole,
 	)
 
 	// 服务端不发心跳（配置中没有该字段），只响应 PING；保活由客户端负责。
@@ -100,9 +142,6 @@ func run() error {
 		Keepalive:   cfg.Server.Dial.Keepalive.D(),
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	// 未认证会话的并发上限：属于稳定性保护（dev.md §3.4），不是用户层防御。
 	pending := make(chan struct{}, cfg.Server.Auth.MaxPendingSessions)
 
@@ -112,12 +151,6 @@ func run() error {
 		logger.Info("收到退出信号，停止接受新会话", log.Event, "shutdown")
 		_ = tln.Close()
 	}()
-
-	// 传输统计：每 metrics_interval 打一行（0 表示关闭）。
-	sampler := metrics.NewSampler(metrics.Default, cfg.Common.MetricsInterval.D(), logger, metrics.Sources{
-		Transport: transport.SnmpStats,
-	})
-	go sampler.Run(ctx)
 
 	for {
 		conn, err := tln.Accept()
@@ -153,8 +186,6 @@ func run() error {
 	} else {
 		logger.Warn("等待活跃会话超时，强制退出", log.Event, "server_stop", "grace", grace.String())
 	}
-	// 退出前再打一条汇总（含累计会话/流数与错误计数）。
-	sampler.Log(sampler.Sample())
 	return nil
 }
 

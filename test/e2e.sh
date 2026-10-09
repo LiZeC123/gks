@@ -7,10 +7,12 @@
 #   TARGETS="http://www.baidu.com" ./test/e2e.sh
 #
 # 可用环境变量覆盖：
-#   SOCKS_PORT  本地 SOCKS5 端口（默认 2080）
-#   KCP_PORT    服务端 KCP 端口（默认 4000）
-#   TARGET_PORT 本地目标服务端口（默认自动挑一个空闲端口）
-#   TARGETS     额外测试的目标 URL 列表（默认 http://www.baidu.com https://www.baidu.com）
+#   SOCKS_PORT          本地 SOCKS5 端口（默认 2080）
+#   KCP_PORT            服务端 KCP 端口（默认 4000）
+#   METRICS_PORT_CLIENT 客户端统计端点端口（默认 12081）
+#   METRICS_PORT_SERVER 服务端统计端点端口（默认 12082，同机必须与客户端错开）
+#   TARGET_PORT         本地目标服务端口（默认自动挑一个空闲端口）
+#   TARGETS             额外测试的目标 URL 列表（默认 http://www.baidu.com https://www.baidu.com）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,6 +20,8 @@ cd "${ROOT}"
 
 SOCKS_PORT="${SOCKS_PORT:-2080}"
 KCP_PORT="${KCP_PORT:-4000}"
+METRICS_PORT_CLIENT="${METRICS_PORT_CLIENT:-12081}"
+METRICS_PORT_SERVER="${METRICS_PORT_SERVER:-12082}"
 TARGETS="${TARGETS:-http://www.baidu.com https://www.baidu.com}"
 
 TMP="$(mktemp -d)"
@@ -64,11 +68,13 @@ log "构建"
 go build -o "${TMP}/server" ./cmd/server
 go build -o "${TMP}/client" ./cmd/client
 
-log "生成临时配置（随机 PSK，端口 ${SOCKS_PORT} / ${KCP_PORT}）"
+log "生成临时配置（随机 PSK，端口 ${SOCKS_PORT} / ${KCP_PORT} / 统计 ${METRICS_PORT_CLIENT},${METRICS_PORT_SERVER}）"
 PSK="$(openssl rand -base64 32)"
 sed -e "s|^  psk: .*|  psk: \"${PSK}\"|" \
     -e "s|127.0.0.1:2080|127.0.0.1:${SOCKS_PORT}|" \
     -e "s|127.0.0.1:4000|127.0.0.1:${KCP_PORT}|g" \
+    -e "s|127.0.0.1:12081|127.0.0.1:${METRICS_PORT_CLIENT}|g" \
+    -e "s|127.0.0.1:12082|127.0.0.1:${METRICS_PORT_SERVER}|g" \
     test/gks.yaml.example > "${TMP}/gks.yaml"
 
 log "启动本地目标服务（127.0.0.1:${TARGET_PORT}）"
@@ -76,9 +82,9 @@ python3 -m http.server "${TARGET_PORT}" --directory "${TMP}" >"${TMP}/target.log
 PIDS+=("$!")
 
 log "启动 gks 服务端与客户端"
-"${TMP}/server" -c "${TMP}/gks.yaml" >"${TMP}/server.log" 2>&1 &
+"${TMP}/server" -c "${TMP}/gks.yaml" -no-console >"${TMP}/server.log" 2>&1 &
 PIDS+=($!)
-"${TMP}/client" -c "${TMP}/gks.yaml" >"${TMP}/client.log" 2>&1 &
+"${TMP}/client" -c "${TMP}/gks.yaml" -no-console >"${TMP}/client.log" 2>&1 &
 PIDS+=($!)
 
 wait_port 127.0.0.1 "${SOCKS_PORT}" || { echo "SOCKS5 端口未就绪"; cat "${TMP}/client.log"; exit 1; }
@@ -96,6 +102,39 @@ check() {
     fail=1
   fi
 }
+
+# 统计端点：拉取 JSON 并校验关键字段（角色、schema、分组、池可用性）。
+check_metrics() {
+  local port="$1" role="$2"
+  if curl -sS -m 5 "http://127.0.0.1:${port}/metrics?window=1s" 2>/dev/null | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+role = sys.argv[1]
+assert p["schema_version"] == 1, p.get("schema_version")
+assert p["role"] == role, p.get("role")
+for key in ("sessions", "streams", "payload", "wire", "link", "errors", "alarms"):
+    assert key in p, key
+assert p["pool"]["available"] is (role == "client"), p["pool"]
+assert isinstance(p["payload"]["sent_total"], int), p["payload"]
+' "${role}" 2>/dev/null; then
+    printf '  \033[32mPASS\033[0m %-40s http://127.0.0.1:%s/metrics\n' "统计端点 ${role}" "${port}"
+  else
+    printf '  \033[31mFAIL\033[0m %-40s http://127.0.0.1:%s/metrics\n' "统计端点 ${role}" "${port}"
+    fail=1
+  fi
+  local hz
+  hz="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/healthz" 2>/dev/null || true)"
+  if [[ "${hz}" == "200" ]]; then
+    printf '  \033[32mPASS\033[0m %-40s http://127.0.0.1:%s/healthz\n' "存活探测 ${role}" "${port}"
+  else
+    printf '  \033[31mFAIL\033[0m %-40s http://127.0.0.1:%s/healthz (got %s)\n' "存活探测 ${role}" "${port}" "${hz}"
+    fail=1
+  fi
+}
+
+log "统计端点（-no-console 下仍然提供 JSON）"
+check_metrics "${METRICS_PORT_CLIENT}" client
+check_metrics "${METRICS_PORT_SERVER}" server
 
 log "功能测试（--socks5-hostname，域名由服务端解析）"
 check "http://127.0.0.1:${TARGET_PORT}/" 200 "本地 HTTP 目标"

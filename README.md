@@ -17,7 +17,10 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
 - 流语义：半关闭（FIN）、RST、未知 StreamID 丢弃、会话关闭广播 RST。
 - 错误码：服务端拨号失败按 SOCKS5 REP 码回传（`5` 拒绝 / `4` 主机不可达 / `3` 网络不可达 / `6` 超时 / `1` 其他）。
 - 链路：心跳保活与判死、可选 KCP 参数与 FEC、传输速率/重传/FEC/池状态指标。
-- 运行：结构化日志、panic 隔离、SIGTERM/SIGINT 退出。
+- 观测：控制台周期刷新的统计表格（`-no-console` 可关）、统计 HTTP 端点
+  （`GET /metrics` JSON + `GET /healthz`，默认 `127.0.0.1:12081`）、结构化日志只写配置文件指定的文件
+  （留空则丢弃任何日志）。
+- 运行：panic 隔离、SIGTERM/SIGINT 退出。
 
 **未实现**
 
@@ -62,6 +65,18 @@ sed -i.bak "s|^  psk: .*|  psk: \"$PSK\"|" gks.yaml && rm -f gks.yaml.bak
 
 服务端只监听 **UDP**，记得放行该端口。默认本地代理地址是 `127.0.0.1:2080`。
 
+两端各起一个**本地统计端点**（示例配置里客户端 `127.0.0.1:12081`、服务端 `127.0.0.1:12082`；
+同机联调必须错开，两机部署可以都用 `12081`）：
+
+```bash
+curl -s 127.0.0.1:12081/metrics | python3 -m json.tool      # 客户端统计（默认 10s 窗口）
+curl -s '127.0.0.1:12082/metrics?window=1s'                  # 服务端统计（1s 窗口）
+./bin/client -c gks.yaml -no-console &                       # 只要端点、不要控制台表格
+```
+
+两个程序的日志默认都**不写文件**（示例配置 `log.file: ""`）；需要留档时在配置里写
+`log.file: "logs/client.log"`（父目录会自动创建）。
+
 ## 使用方式
 
 命令行：
@@ -86,8 +101,10 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 ./test/concurrent.sh 100 http://127.0.0.1:8081/   # 并发压测（注意 ulimit -n）
 ```
 
-日志是结构化的，常用事件：`client_start`、`server_start`、`proxy_up`、`proxy_down`、
-`session_up`、`session_down`、`dial_failed`、`auth_failed`、`pool_session_new`、`pool_session_dead`、`metrics`。
+日志只写 `*.log.file` 指定的文件（留空即丢弃），常用事件：`client_start`、`server_start`、
+`shutdown`、`session_up`、`session_down`、`dial_failed`、`auth_failed`、`pool_session_new`、
+`pool_session_dead`、`accept_error`、`pending_limit`、`client_stop`、`server_stop`、`pool_stats`。
+运行状态改由控制台表格与 `GET /metrics` 呈现（见「观测与调优」）。
 
 ## 配置
 
@@ -95,14 +112,18 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 
 | 段 | 用途 |
 | --- | --- |
-| `common` | 两端必须一致的参数（PSK、加密算法、KCP 调参、FEC、上限、采样间隔）——只写一次 |
-| `client` | 本地 SOCKS5 监听、连接池、服务端地址、心跳、日志级别 |
-| `server` | KCP 监听、认证窗口、拨号超时、日志级别 |
+| `common` | 两端必须一致的参数（PSK、加密算法、KCP 调参、FEC、上限、统计刷新周期）——只写一次 |
+| `client` | 本地 SOCKS5 监听、连接池、服务端地址、心跳、统计端点、日志 |
+| `server` | KCP 监听、认证窗口、拨号超时、统计端点、日志 |
 
 要点：
 
 - **严格模式**：未知字段直接启动失败；把 `common` 的字段写进 `client`/`server` 同样报错——这样两端不可能写岔。
 - 启动前会校验所有字段，问题会**一次性全部列出**（缺少必填、越界、地址不合法等）。
+- `*.metrics.listen`：**不写**时默认 `127.0.0.1:12081`；显式写 `""` 表示关闭该端点。
+  两个程序读同一份配置时，同机运行必须错开端口（示例里客户端 `12081`、服务端 `12082`）。
+- `*.log.file`：日志只写这个文件；留空表示**不写任何日志文件**。父目录不存在会自动创建，
+  打开失败即启动失败。
 - `common.psk`：base64 编码的 32 字节，且不能是全 0 占位值。
 - `common.aead`：`chacha20-poly1305`（默认）或 `aes-256-gcm`。
 - `common.crypt`：`none`（默认）或 `aes-128-gcm` / `aes-256-gcm` / `aes-128` / `aes-256` / `salsa20`；开启后连 KCP 头也被加密（隐藏协议指纹），代价是每包多 28B 与一点 CPU。
@@ -119,7 +140,7 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `common.stream.idle_timeout` | `600s` | 流长时间无数据则 RST |
 | `common.limits.max_streams_per_session` | `256` | 单会话开流上限 |
 | `common.limits.max_frame_body` / `max_data_payload` | `65536` / `16384` | 帧体上限 / 单帧载荷上限（发送方据此拆帧） |
-| `common.metrics_interval` | `10s` | 指标采样间隔，`0` 关闭 |
+| `common.metrics_interval` | `10s` | 控制台表格刷新周期 + `/metrics` 默认速率窗口；必须 > 0 且 ≤ `10m` |
 | `client.listen` | `127.0.0.1:2080` | 本地 SOCKS5 监听 |
 | `client.socks5.handshake_timeout` | `10s` | 本地协商 + 请求解析 |
 | `client.socks5.connect_timeout` | `10s` | 等待服务端 `CONNECT_RESP` |
@@ -134,34 +155,112 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `server.auth.timestamp_window` | `60s` | 允许的时钟偏差/重放窗口 |
 | `server.auth.max_pending_sessions` | `1024` | 未认证会话并发上限 |
 | `server.dial.timeout` / `keepalive` | `10s` / `30s` | 拨号目标 |
+| `client.metrics.listen` / `server.metrics.listen` | `127.0.0.1:12081` | 统计 HTTP 端点；不写用默认地址，写 `""` 关闭（同机需错开端口） |
+| `*.log.file` | `""` | 日志文件；空 = 不写日志文件（父目录自动创建，打开失败即启动失败） |
 | `*.shutdown_grace` | `30s` | 退出时等待在途连接收尾 |
 
 ## 观测与调优
 
-把 `common.metrics_interval` 设为非 0（默认 10s），两端会各自周期输出一行 `event=metrics`：
+观测有三个出口，职责分明：**控制台表格**（人看）、**HTTP 端点**（程序拉）、**日志文件**（事后查）。
+与统计无关的事件日志（启动/停止/会话/错误）只写文件，不会和控制台表格抢屏。
+
+### 控制台表格
+
+启动后每 `common.metrics_interval`（默认 10s）刷新一次：
 
 ```text
-level=INFO msg=传输统计 event=metrics interval=10s sessions=2 streams=1 \
-  payload_sent="426 KB/s" payload_recv="2.3 KB/s" wire_sent="2.7 MB/s" wire_recv="38 KB/s" \
-  payload_sent_total="27.0 MB" payload_recv_total="142 KB" wire_sent_total="57.7 MB" wire_recv_total="1007 KB" \
-  retrans=52.54% lost_segs=4032 repeat_segs=7 fec_recovered=35 fec_errs=0 \
-  pool_in_use=1 pool_idle=1 pool_creating=0 pool_waiters=0 pool_rebuilds=0 \
-  errors="auth=0 session=0 socks5=0 dial=0"
+gks client · 运行 1h02m03s · 窗口 10s · 2025-10-09 13:02:01
+┌────────────┬────────────────────┬──────────────────┐
+│ 会话/流    │ sessions           │ 2                │
+│            │ streams            │ 1                │
+│            │ sessions_total     │ 12               │
+│            │ streams_total      │ 418              │
+├────────────┼────────────────────┼──────────────────┤
+│ 载荷速率   │ payload_sent       │ 426.0 KB/s       │
+│            │ payload_recv       │ 2.3 KB/s         │
+├────────────┼────────────────────┼──────────────────┤
+│ 线速率     │ wire_sent          │ 2.7 MB/s         │
+...
+│ 链路质量   │ retrans            │ 52.54%           │
+│ 会话池     │ pool_waiters       │ 0                │
+│ 错误       │ dial               │ 0                │
+└────────────┴────────────────────┴──────────────────┘
+[告警] pool_waiters=1；retrans=52.54%(≥1%)
 ```
+
+- 终端（TTY）里**原地刷新**；输出被重定向到文件/管道时，每个周期**追加**一份同样的纯文本表格
+  （不含 ANSI 转义，可直接留档）。
+- 表格写 stdout。`-no-console`（等价 `--no-console`）关闭表格；配合 `log.file: ""`
+  就是**完全静默**：进程不产生任何输出。
+- 启动初期历史不足一个窗口时，速率与增量列显示 `n/a`，此时会多一行提示；攒够窗口后自动消失。
+- 分组顺序固定：会话/流 → 载荷速率 → 线速率 → 累计量 → 链路质量 → 会话池（仅客户端）→ 错误；
+  末行固定为 `[告警]`（无异常显示 `[告警] 无`）。告警判据：`pool_waiters > 0`、
+  `retrans > 1%`（发送段 ≥ 20 时）、`fec_errs > 0`、`kcp_in_errors > 0`。
+
+### 统计 HTTP 端点
+
+两端各有一个本地端点（`client.metrics.listen` / `server.metrics.listen`），默认关闭日志之外的
+一切鉴权，因此**默认只监听 127.0.0.1**；要对外暴露请自行加反向代理/防火墙。
+
+| 请求 | 说明 |
+| --- | --- |
+| `GET /metrics` | JSON 统计，速率窗口 = `metrics_interval` |
+| `GET /metrics?window=1s` | 指定速率窗口，取值需在 `1s`~`10m`，否则 `400` |
+| `GET /healthz` | 存活探测：`{"status":"ok","role":...,"uptime_seconds":...}` |
+
+其他路径 `404`，非 GET/HEAD `405`。累计计数器是**请求时刻**的新鲜值，速率与增量是该窗口两端
+算出的值——因此外部程序**按 1s 拉取时用 `?window=1s` 就能拿到真正的 1s 速率**，多个消费者
+各拉各的窗口互不干扰（历史是只读的）。历史以 1s 粒度保留 10 分钟。
+
+```bash
+curl -s '127.0.0.1:12081/metrics?window=1s' | python3 -m json.tool
+```
+
+```json
+{
+  "schema_version": 1,
+  "role": "client",
+  "started_at": "2025-10-09T12:00:00+08:00",
+  "uptime_seconds": 3721.5,
+  "now": "2025-10-09T13:02:01.123+08:00",
+  "rate_window_seconds": 1,
+  "rate_available": true,
+  "sessions": {"active": 2, "total": 12},
+  "streams": {"active": 1, "total": 418},
+  "payload": {"sent_total": 28311552, "recv_total": 145408, "sent_bps": 446545.9, "recv_bps": 2354.1},
+  "wire": {"sent_total": 60489728, "recv_total": 1031168, "sent_bps": 2831155.2, "recv_bps": 38912.0},
+  "link": {
+    "out_segs_total": 12345, "in_segs_total": 12000,
+    "retrans_segs_total": 2000, "fast_retrans_segs_total": 10,
+    "window": {"seconds": 1, "out_segs": 320, "retrans_ratio": 0.5254, "retrans_ratio_available": true,
+               "lost_segs": 402, "repeat_segs": 7, "kcp_in_errors": 0, "fec_recovered": 35, "fec_errs": 0}
+  },
+  "pool": {"available": true, "in_use": 1, "idle": 1, "creating": 0, "waiters": 0, "rebuilds": 0},
+  "errors": {"auth": 0, "session": 0, "socks5": 0, "dial": 0},
+  "alarms": ["pool_waiters=1", "retrans=52.54%"]
+}
+```
+
+- `*_total` 是进程启动至今的单调累计（`payload_*` 是隧道载荷，`wire_*` 是 UDP 线字节）；
+  消费方也可以直接对这些计数器做差分，自己算任意间隔的速率。
+- `payload.*_bps` / `wire.*_bps` / `link.window.*` 是**窗口内**的速率与增量；历史不足一个完整
+  窗口时 `rate_available` 为 `false`，这些字段为 `null`。`retrans_ratio_available` 在窗口内发送段
+  < 20 时为 `false`（小样本百分比会误导）。
+- `pool.available`：服务端没有会话池，固定为 `false`；客户端为 `true`。
+- `alarms` 与表格末行同口径，无异常时是空数组。
 
 | 字段 | 含义 |
 | --- | --- |
-| `payload_sent` / `payload_recv` | 隧道**载荷**速率（应用数据），实时累加 |
-| `wire_sent` / `wire_recv` | **UDP 线速率**；与 payload 之比即链路开销 |
-| `payload_*_total` / `wire_*_total` | 进程启动至今的累计量；客户端 `payload_recv_total` 应约等于服务端 `payload_sent_total` |
-| `retrans` | 本区间「重传段 / 发出的段」；发送段 < 20 时显示 `n/a` |
-| `lost_segs` | 本端 RTO 超时事件的增量（同一段反复超时会重复计数，不是“丢失的段数”） |
+| `payload.*` | 隧道**载荷**（应用数据）速率与累计 |
+| `wire.*` | **UDP 线速率**与累计；与 payload 之比即链路开销 |
+| `retrans_ratio` | 窗口内「重传段 / 发出的段」；持续 > 1% 说明 UDP 链路有丢包或限速 |
+| `lost_segs` | 本端 RTO 超时事件的窗口增量（同一段反复超时会重复计数，不是"丢失的段数"） |
 | `repeat_segs` | **对端重传过来的、本端已经收到的段数**（对端方向的丢包信号） |
 | `fec_recovered` / `fec_errs` | FEC 成功恢复 / 恢复失败的包数；`fec_recovered > 0` 才说明 FEC 在起作用 |
-| `pool_in_use` / `pool_idle` / `pool_creating` / `pool_waiters` / `pool_rebuilds` | 池状态；**`pool_waiters > 0` 说明并发已顶到 `max_sessions`** |
-| `errors` | 认证失败 / 建会话失败 / 本地 SOCKS5 失败 / 目标拨号失败 |
+| `pool_*` | 池状态；**`waiters > 0` 说明并发已顶到 `max_sessions`** |
+| `errors.*` | 认证失败 / 建会话失败 / 本地 SOCKS5 失败 / 目标拨号失败（累计） |
 
-参考值与调参：
+### 参考值与调参
 
 | 场景 | 实测（loopback, MTU 1350 / window 256 / interval 10ms） |
 | --- | --- |
@@ -191,6 +290,10 @@ sudo tcpdump -i en0 -n udp port 4000 -w kcp.pcap   # 交给 Wireshark IO Graph �
 | 服务端 `retrans` 很高（如 50%） | 表示“发出的段里一半是重传”，不等于丢包率；此时链路已在承压，先降负载（关 FEC、加大 `interval`、减少并发）再看 |
 | 改了 `common` 却不生效 | 两端必须用同一份配置并**都重启**；`common` 与 `client`/`server` 的字段不能互换（严格模式会报错） |
 | 会话反复重建（`pool_rebuilds` 增长） | 链路质量差或服务端不可达；看 `session_down` 的原因 |
+| 启动报 `统计端点监听 127.0.0.1:12081: address already in use` | 同机跑了两个 gks（或端口被占）：把 `server.metrics.listen` 换成 `127.0.0.1:12082`，或写 `""` 关闭端点 |
+| 终端里什么都看不到 | 日志只写 `log.file`（留空即丢弃），控制台只有统计表格；`-no-console` + 空 `log.file` 就是**完全静默**，这是预期行为 |
+| `curl 127.0.0.1:12081/metrics` 连不上 | 端点被写成空串关了、端口写错、或程序没起来；看日志里的 `metrics_listen` 字段 |
+| `rate_available: false` | 启动时间不足一个 `metrics_interval`，历史还没攒够一个完整窗口；等一个周期再拉，或把 `?window=` 调小 |
 
 ## 测试
 
@@ -203,7 +306,15 @@ go vet ./...
 覆盖：帧编解码与边界/异常、AAD 篡改检测、nonce 溢出拒绝、HKDF 域分离、时间窗与重放、
 地址/CONNECT 编解码与错误码映射、真实 KCP 上的握手与心跳判死、安全态明文帧必须断开（不降级）、
 大块分帧重组与半关闭、RST 传播、接收缓冲满时重置该流、会话池（预热/复用/排队/回收/重建/失效摘除/
-服务端重启恢复）、5 次串行请求只建立 1 条会话、指标计算与日志字段。
+服务端重启恢复）、5 次串行请求只建立 1 条会话、速率窗口与环形历史（1s~10m 边界、历史不足）、
+表格渲染（列宽对齐、TTY/非 TTY、告警判据）、`/metrics`·`/healthz` 的 JSON 契约与参数校验、
+日志文件（自动建目录、追加、级别过滤、空值丢弃）。
+
+一键验收（自动挑空闲端口、生成随机 PSK、起本地目标、验证统计端点与错误码）：
+
+```bash
+./test/e2e.sh                                     # 独立临时配置，不会碰你手头的 gks.yaml
+```
 
 ## 目录结构
 
@@ -219,8 +330,9 @@ gks/
 │   ├── server/         # 会话处理、CONNECT_REQ 拨号与转发
 │   ├── transport/      # KCP 拨号/监听、调参、传输层加密开关、Snmp 采集
 │   ├── config/         # 三段式配置与严格校验
-│   ├── metrics/        # 进程级计数器与周期采样
-│   └── log/            # slog 封装与字段规范
+│   ├── metrics/        # 计数器、1s 粒度速率历史、控制台表格与 HTTP JSON 呈现
+│   ├── monitor/        # 采样/表格/HTTP 端点的生命周期接线
+│   └── log/            # slog 封装、字段规范与日志文件管理
 └── test/
     ├── gks.yaml.example
     ├── integration_test.go   # 进程内起 server + client + 目标服务
