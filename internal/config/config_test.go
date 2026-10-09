@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,20 @@ func replaceLast(s, old, new string) string {
 		return s
 	}
 	return s[:i] + new + s[i+len(old):]
+}
+
+// setKey 把示例配置里第一处 「<缩进><key>: ...」 整行替换为 「<缩进><key>: <value>」。
+//
+// 用例只关心「某字段非法时是否被拦下」，不应依赖示例里的具体取值——示例会随调参变化
+// （metrics_interval、pool.size 等都被人工改过），用字面量做替换会让用例假失败。
+// 找不到字段属于测试自身写错，直接 panic 立刻暴露。
+func setKey(body, key, value string) string {
+	re := regexp.MustCompile(`(?m)^([ \t]*` + regexp.QuoteMeta(key) + `:)[ \t]*[^\n]*$`)
+	m := re.FindStringSubmatchIndex(body)
+	if m == nil {
+		panic("示例配置里找不到字段: " + key)
+	}
+	return body[:m[0]] + body[m[2]:m[3]] + " " + value + body[m[1]:]
 }
 
 func writeConfig(t *testing.T, body string) string {
@@ -333,7 +348,7 @@ func TestClientValidateErrors(t *testing.T) {
 		{"connect_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "connect_timeout: 10s", "connect_timeout: 0s", 1)
 		}, "client.socks5.connect_timeout"},
-		{"pool.size 为 0", func(s string) string { return strings.Replace(s, "size: 2", "size: 0", 1) }, "client.pool.size"},
+		{"pool.size 为 0", func(s string) string { return setKey(s, "size", "0") }, "client.pool.size"},
 		{"max_sessions 小于 size", func(s string) string { return strings.Replace(s, "max_sessions: 64", "max_sessions: 1", 1) }, "client.pool.max_sessions"},
 		{"pool.idle_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "idle_timeout: 300s", "idle_timeout: 0s", 1)
@@ -441,8 +456,8 @@ func TestServerValidateErrors(t *testing.T) {
 
 // TestValidateAggregatesCommonAndOwnSection 验证两段的问题会一次性报出。
 func TestValidateAggregatesCommonAndOwnSection(t *testing.T) {
-	body := strings.Replace(exampleBody(t), "mtu: 1350", "mtu: 5000", 1)
-	body = strings.Replace(body, "size: 2", "size: 0", 1)
+	body := setKey(exampleBody(t), "mtu", "5000")
+	body = setKey(body, "size", "0")
 	cfg, err := loadBody(t, body)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
@@ -556,7 +571,7 @@ func TestLogFileValidate(t *testing.T) {
 
 func TestMetricsIntervalBounds(t *testing.T) {
 	for _, v := range []string{"0s", "11m"} {
-		body := strings.Replace(exampleBody(t), "metrics_interval: 10s", "metrics_interval: "+v, 1)
+		body := setKey(exampleBody(t), "metrics_interval", v)
 		cfg, err := loadBody(t, body)
 		if err != nil {
 			t.Fatalf("解析阶段不应失败: %v", err)
@@ -567,7 +582,7 @@ func TestMetricsIntervalBounds(t *testing.T) {
 		}
 	}
 	// 边界值 10m 合法。
-	body := strings.Replace(exampleBody(t), "metrics_interval: 10s", "metrics_interval: 10m", 1)
+	body := setKey(exampleBody(t), "metrics_interval", "10m")
 	cfg, err := loadBody(t, body)
 	if err != nil {
 		t.Fatalf("解析阶段不应失败: %v", err)
