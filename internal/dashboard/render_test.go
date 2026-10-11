@@ -38,10 +38,10 @@ func TestNewPageChartsAndDerived(t *testing.T) {
 	if page.Role != "client" || page.M.Payload.SentTotal != 27<<20 {
 		t.Fatalf("上游数据未透传: role=%q payload=%+v", page.Role, page.M.Payload)
 	}
-	if len(page.Charts) != 4 {
-		t.Fatalf("应有 4 张折线图，实际 %d", len(page.Charts))
+	if len(page.Charts) != 5 {
+		t.Fatalf("应有 5 张折线图，实际 %d", len(page.Charts))
 	}
-	wantTitles := []string{"上行", "下行", "重传率", "错误率"}
+	wantTitles := []string{"上行", "下行", "重传率", "错误率", "会话回收"}
 	for i, want := range wantTitles {
 		if !strings.Contains(page.Charts[i].Title, want) {
 			t.Fatalf("第 %d 张图标题 = %q，应包含 %q", i, page.Charts[i].Title, want)
@@ -58,6 +58,13 @@ func TestNewPageChartsAndDerived(t *testing.T) {
 	}
 	if len(page.Charts[2].Legend) != 1 || len(page.Charts[3].Legend) != 1 {
 		t.Fatal("重传率与错误率各应为一条线")
+	}
+	// 会话回收图：沉默判活 + GOAWAY 两条线；增量数据取自样本差分。
+	if len(page.Charts[4].Legend) != 2 {
+		t.Fatalf("会话回收图应为两条线，实际 %d", len(page.Charts[4].Legend))
+	}
+	if !strings.Contains(page.Charts[4].Note, "GOAWAY") {
+		t.Fatalf("会话回收图注释应解释两条线: %q", page.Charts[4].Note)
 	}
 	if !strings.Contains(page.Charts[0].Note, "线/载荷") {
 		t.Fatalf("上行图注释应给出线/载荷比值: %q", page.Charts[0].Note)

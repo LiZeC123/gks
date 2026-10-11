@@ -94,6 +94,18 @@ func TestRenderChartSVGYFormatting(t *testing.T) {
 	if !strings.Contains(per1k, "22.00") {
 		t.Fatalf("每千条流刻度应保留两位小数（20 × 1.1 上限）:\n%s", per1k)
 	}
+	counts := RenderChartSVG(ChartSpec{
+		Title:  "会话回收",
+		Kind:   KindCount,
+		Series: []ChartSeries{{Name: "s", Color: "#000", Values: []*float64{ptr(7)}}},
+	})
+	// 计数图用整数刻度：axisTop(7) = 7.7 → 顶端刻度显示 8。
+	if !strings.Contains(counts, ">8</text>") {
+		t.Fatalf("计数刻度应为整数（7 × 1.1 上限 → 8）:\n%s", counts)
+	}
+	if strings.Contains(counts, "%") || strings.Contains(counts, "B/s") {
+		t.Fatalf("计数图不应出现百分比或速率单位:\n%s", counts)
+	}
 }
 
 func TestAxisTop(t *testing.T) {
@@ -107,6 +119,8 @@ func TestAxisTop(t *testing.T) {
 		{KindPercent, 0.5, 1.1},       // 小于 1% 时下限按 1%
 		{KindPercent, 50, 55},         // 大值仍按 10% 余量
 		{KindPer1k, 0.2, 1.1},
+		{KindCount, 0, 1.1}, // 全 0 也保底 1，曲线贴底可见
+		{KindCount, 7, 7.7},
 	}
 	for _, tc := range cases {
 		if got := axisTop(tc.max, tc.kind); math.Abs(got-tc.want) > 1e-9 {

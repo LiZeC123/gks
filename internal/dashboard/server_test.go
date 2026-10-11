@@ -20,6 +20,8 @@ func newTestState(t *testing.T, samples int) (*State, time.Time) {
 		i := i
 		addSample(t, st, base.Add(time.Duration(i)*time.Second), func(p *metrics.Payload) {
 			p.Streams.Total = 418 + uint64(i)*10
+			p.Sessions.ReapedSilence = uint64(i)        // 0,1,2
+			p.Sessions.GoAwayReceived = 4 + uint64(i)*2 // 4,6,8
 		})
 	}
 	return st, base
@@ -76,6 +78,9 @@ func TestServerPageRendersEverything(t *testing.T) {
 		"累计数据", "载荷上行累计", "27.0 MB", "窗口速率", "派生指标", "链路开销比",
 		"趋势", `<svg class="chart"`, "链路明细", "会话池", "错误累计",
 		`data-refresh-ms="2000"`, "/static/app.js",
+		// 会话生命周期（本次新增）：两张卡片 + 派生占比 + 趋势图容器（一行两张）。
+		"沉默判活回收（累计）", "收到 GOAWAY（累计）", "沉默回收占比",
+		`class="charts"`, "会话回收（每采样点）",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("页面缺少 %q", want)
@@ -85,9 +90,9 @@ func TestServerPageRendersEverything(t *testing.T) {
 	if !strings.Contains(body, "pool_waiters=1") {
 		t.Fatal("上游告警未渲染")
 	}
-	// 四张图都应有 SVG。
-	if n := strings.Count(body, `<svg class="chart"`); n != 4 {
-		t.Fatalf("SVG 数量 = %d，期望 4", n)
+	// 五张图都应有 SVG。
+	if n := strings.Count(body, `<svg class="chart"`); n != 5 {
+		t.Fatalf("SVG 数量 = %d，期望 5", n)
 	}
 }
 
@@ -117,6 +122,13 @@ func TestServerStaticAssets(t *testing.T) {
 	}
 	if ct := header.Get("Content-Type"); !strings.Contains(ct, "css") {
 		t.Fatalf("css Content-Type = %q", ct)
+	}
+	// 趋势图一行两张：窄屏才降为单列（信息密度是显式需求，别被误删）。
+	if !strings.Contains(css, `grid-template-columns: repeat(2, minmax(0, 1fr))`) {
+		t.Fatal("style.css 缺少「一行两张折线图」的栅格定义")
+	}
+	if !strings.Contains(css, "@media (max-width: 1100px)") {
+		t.Fatal("style.css 缺少窄屏降为单列的媒体查询")
 	}
 	status, js, _ := getBody(t, ts.URL+"/static/app.js")
 	if status != http.StatusOK || !strings.Contains(js, "/partial") {
@@ -159,20 +171,24 @@ func TestServerAPIState(t *testing.T) {
 			StaleSeconds *float64 `json:"stale_seconds"`
 		} `json:"upstream"`
 		Latest *struct {
-			SchemaVersion int             `json:"schema_version"`
-			TotalErrors   uint64          `json:"total_errors"`
-			ErrorsDelta   uint64          `json:"errors_delta"`
-			StreamsDelta  uint64          `json:"streams_delta"`
-			Payload       metrics.IORates `json:"payload"`
+			SchemaVersion int                     `json:"schema_version"`
+			TotalErrors   uint64                  `json:"total_errors"`
+			ErrorsDelta   uint64                  `json:"errors_delta"`
+			StreamsDelta  uint64                  `json:"streams_delta"`
+			Payload       metrics.IORates         `json:"payload"`
+			Sessions      metrics.SessionCounters `json:"sessions"`
 		} `json:"latest"`
 		Derived struct {
 			WirePayloadRatio *float64 `json:"wire_payload_ratio"`
+			SilenceReapShare *float64 `json:"silence_reap_share"`
 		} `json:"derived"`
 		Alarms  []string `json:"alarms"`
 		History []struct {
 			At             time.Time `json:"at"`
 			PayloadSentBps *float64  `json:"payload_sent_bps"`
 			RetransRatio   *float64  `json:"retrans_ratio"`
+			ReapedDelta    uint64    `json:"reaped_delta"`
+			GoAwayDelta    uint64    `json:"goaway_delta"`
 		} `json:"history"`
 	}
 	if err := json.Unmarshal([]byte(body), &dto); err != nil {
@@ -199,6 +215,19 @@ func TestServerAPIState(t *testing.T) {
 	}
 	if dto.Derived.WirePayloadRatio == nil {
 		t.Fatal("派生指标缺失")
+	}
+	// 会话生命周期（schema v2）：latest.sessions 透传，派生占比与 history 增量都要有。
+	if dto.Latest.Sessions.ReapedSilence != 2 || dto.Latest.Sessions.GoAwayReceived != 8 {
+		t.Fatalf("latest.sessions 生命周期计数未透传: %+v", dto.Latest.Sessions)
+	}
+	if dto.Derived.SilenceReapShare == nil || *dto.Derived.SilenceReapShare != 2.0/12 {
+		t.Fatalf("沉默回收占比 = %v", dto.Derived.SilenceReapShare)
+	}
+	if dto.History[2].ReapedDelta != 1 || dto.History[2].GoAwayDelta != 2 {
+		t.Fatalf("history 会话回收增量不对: %+v", dto.History[2])
+	}
+	if dto.History[0].ReapedDelta != 0 {
+		t.Fatalf("首条样本的增量应为 0: %+v", dto.History[0])
 	}
 	if len(dto.History) != 3 {
 		t.Fatalf("history 长度 = %d", len(dto.History))

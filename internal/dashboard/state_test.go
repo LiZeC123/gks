@@ -26,7 +26,7 @@ func samplePayload(now time.Time) metrics.Payload {
 		Now:               now,
 		RateWindowSeconds: 1,
 		RateAvailable:     true,
-		Sessions:          metrics.SessionCounters{Active: 2, Total: 12},
+		Sessions:          metrics.SessionCounters{Active: 2, Total: 12, ReapedSilence: 1, GoAwayReceived: 4},
 		Streams:           metrics.CountPair{Active: 1, Total: 418},
 		Payload: metrics.IORates{
 			SentTotal: 27 << 20,
@@ -129,10 +129,15 @@ func TestStateComputesWindowDeltas(t *testing.T) {
 	addSample(t, st, base, nil)
 	second := addSample(t, st, base.Add(time.Second), func(p *metrics.Payload) {
 		p.Streams.Total = 418 + 100
-		p.Errors.Dial = 3 + 2 // 累计错误 3 → 5
+		p.Errors.Dial = 3 + 2             // 累计错误 3 → 5
+		p.Sessions.ReapedSilence = 1 + 2  // 沉默判活回收 1 → 3
+		p.Sessions.GoAwayReceived = 4 + 5 // GOAWAY 4 → 9
 	})
 	if second.StreamsDelta != 100 || second.ErrorsDelta != 2 {
 		t.Fatalf("窗口增量不对: streams=%d errors=%d", second.StreamsDelta, second.ErrorsDelta)
+	}
+	if second.ReapedDelta != 2 || second.GoAwayDelta != 5 {
+		t.Fatalf("会话回收增量不对: reaped=%d goaway=%d", second.ReapedDelta, second.GoAwayDelta)
 	}
 	if got := second.ErrorsPer1k(); got == nil || math.Abs(*got-20) > 1e-9 {
 		t.Fatalf("每千条流错误数 = %v，期望 20", got)
@@ -187,6 +192,9 @@ func TestSnapshotDerived(t *testing.T) {
 	if d.ErrorsPer1kStreams == nil || math.Abs(*d.ErrorsPer1kStreams-3.0/418*1000) > 1e-9 {
 		t.Fatalf("错误密度 = %v", d.ErrorsPer1kStreams)
 	}
+	if d.SilenceReapShare == nil || math.Abs(*d.SilenceReapShare-1.0/12) > 1e-9 {
+		t.Fatalf("沉默回收占比 = %v", d.SilenceReapShare)
+	}
 	if d.StaleSeconds == nil || *d.StaleSeconds != 0 {
 		t.Fatalf("陈旧度 = %v", d.StaleSeconds)
 	}
@@ -202,7 +210,8 @@ func TestSnapshotDerivedEmptyAndZeroSafe(t *testing.T) {
 	st := NewState(4)
 	st.MarkSuccess(Sample{Received: now, Metrics: metrics.Payload{SchemaVersion: metrics.SchemaVersion}}, "")
 	d := st.Snapshot().Derived(now)
-	if d.WirePayloadRatio != nil || d.AvgPayloadBps != nil || d.StreamsPerSession != nil || d.ErrorsPer1kStreams != nil {
+	if d.WirePayloadRatio != nil || d.AvgPayloadBps != nil || d.StreamsPerSession != nil ||
+		d.ErrorsPer1kStreams != nil || d.SilenceReapShare != nil {
 		t.Fatalf("除零时应为 nil: %+v", d)
 	}
 }

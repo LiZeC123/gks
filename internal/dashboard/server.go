@@ -15,7 +15,10 @@ import (
 )
 
 // stateSchemaVersion 是 /api/state 的格式版本（与上游 /metrics 的 schema_version 无关）。
-const stateSchemaVersion = 1
+//
+// 版本 2：latest.sessions 增加沉默回收 / GOAWAY 计数，derived 增加 silence_reap_share，
+// history 增加 reaped_delta / goaway_delta（会话回收增量）。
+const stateSchemaVersion = 2
 
 // assets 是内嵌的页面资源：index.html（模板）、style.css、app.js。
 // 单文件分发靠它——运行时不读任何外部文件。
@@ -207,6 +210,9 @@ type pointDTO struct {
 	WireRecvBps    *float64  `json:"wire_recv_bps"`
 	RetransRatio   *float64  `json:"retrans_ratio"`
 	ErrorsPer1k    *float64  `json:"errors_per_1k_streams"`
+	// ReapedDelta / GoAwayDelta 是该采样区间内「沉默判活回收」与「收到 GOAWAY」的会话数增量。
+	ReapedDelta uint64 `json:"reaped_delta"`
+	GoAwayDelta uint64 `json:"goaway_delta"`
 }
 
 type errPayload struct {
@@ -259,6 +265,8 @@ func (s *Server) stateDTO() stateDTO {
 			WireRecvBps:    smp.Metrics.Wire.RecvBps,
 			RetransRatio:   smp.RetransRatio(),
 			ErrorsPer1k:    smp.ErrorsPer1k(),
+			ReapedDelta:    smp.ReapedDelta,
+			GoAwayDelta:    smp.GoAwayDelta,
 		})
 	}
 	if latest, ok := snap.Latest(); ok {

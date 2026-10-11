@@ -27,6 +27,10 @@ type Sample struct {
 	// 上游只给累计错误数，窗口错误率只能由面板自己按相邻样本差分，因此必须随样本一起存。
 	ErrorsDelta  uint64
 	StreamsDelta uint64
+	// ReapedDelta / GoAwayDelta 同样是相邻样本的累计增量：分别是「因对端沉默被回收的会话数」与
+	// 「收到的 GOAWAY 数」。会话回收是稀疏事件，用增量画图才能看出尖峰。
+	ReapedDelta uint64
+	GoAwayDelta uint64
 }
 
 // ErrorsPer1k 返回窗口内「每千条流的错误数」；窗口内没有新流时为 nil（曲线断开）。
@@ -93,6 +97,8 @@ func (s *State) MarkSuccess(smp Sample, schemaWarn string) {
 		prev := s.samples[n-1]
 		smp.ErrorsDelta = counterSub(TotalErrors(smp.Metrics), TotalErrors(prev.Metrics))
 		smp.StreamsDelta = counterSub(smp.Metrics.Streams.Total, prev.Metrics.Streams.Total)
+		smp.ReapedDelta = counterSub(smp.Metrics.Sessions.ReapedSilence, prev.Metrics.Sessions.ReapedSilence)
+		smp.GoAwayDelta = counterSub(smp.Metrics.Sessions.GoAwayReceived, prev.Metrics.Sessions.GoAwayReceived)
 	}
 	s.samples = append(s.samples, smp)
 	if len(s.samples) > s.capacity {
@@ -177,6 +183,9 @@ type Derived struct {
 	StreamsPerSession *float64 `json:"streams_per_session"`
 	// ErrorsPer1kStreams 是累计错误数换算成「每千条流」的错误数。
 	ErrorsPer1kStreams *float64 `json:"errors_per_1k_streams"`
+	// SilenceReapShare 是「因沉默被回收的会话数 / 累计会话数」：客户端不告而别的比例。
+	// 越接近 0 越好；持续偏高说明客户端退出路径没走优雅告别。
+	SilenceReapShare *float64 `json:"silence_reap_share"`
 	// FECSuccessRatio 是窗口内 fec_recovered/(fec_recovered+fec_errs)。
 	FECSuccessRatio *float64 `json:"fec_success_ratio"`
 	// StaleSeconds 是页面生成时刻距最近一次成功拉取的秒数。
@@ -202,6 +211,9 @@ func (s Snapshot) Derived(now time.Time) Derived {
 	}
 	if m.Streams.Total > 0 {
 		d.ErrorsPer1kStreams = ratio(float64(TotalErrors(m)), float64(m.Streams.Total)/1000)
+	}
+	if m.Sessions.Total > 0 {
+		d.SilenceReapShare = ratio(float64(m.Sessions.ReapedSilence), float64(m.Sessions.Total))
 	}
 	fecOK, fecErr := windowUint(m.Link.Window.FECRecovered), windowUint(m.Link.Window.FECErrs)
 	if fecOK+fecErr > 0 {

@@ -52,6 +52,8 @@
   <div class="card"><div class="k">线下行累计（UDP）</div><div class="v">{{humanBytes .M.Wire.RecvTotal}}</div></div>
   <div class="card"><div class="k">会话 活跃 / 累计</div><div class="v">{{int64v .M.Sessions.Active}} / {{count .M.Sessions.Total}}</div></div>
   <div class="card"><div class="k">流 活跃 / 累计</div><div class="v">{{int64v .M.Streams.Active}} / {{count .M.Streams.Total}}</div></div>
+  <div class="card"><div class="k">沉默判活回收（累计）</div><div class="v">{{count .M.Sessions.ReapedSilence}}</div><div class="s">对端沉默被判死；增长说明客户端「不告而别」</div></div>
+  <div class="card"><div class="k">收到 GOAWAY（累计）</div><div class="v">{{count .M.Sessions.GoAwayReceived}}</div><div class="s">对端主动告别（池回收空闲会话 / 对端退出）</div></div>
   <div class="card"><div class="k">错误累计（四类合计）</div><div class="v">{{count .TotalErrors}}</div></div>
 </div>
 
@@ -71,11 +73,13 @@
   <div class="card"><div class="k">平均载荷速率（上下行合计）</div><div class="v">{{humanRate .Derived.AvgPayloadBps}}</div></div>
   <div class="card"><div class="k">每会话平均流数</div><div class="v">{{plain2 .Derived.StreamsPerSession}}</div><div class="s">当前形态理想值 ≈ 1</div></div>
   <div class="card"><div class="k">错误密度（每千条流）</div><div class="v">{{plain2 .Derived.ErrorsPer1kStreams}}</div></div>
+  <div class="card"><div class="k">沉默回收占比</div><div class="v">{{pct .Derived.SilenceReapShare}}</div><div class="s">沉默回收 / 累计会话；越接近 0 越好</div></div>
   <div class="card"><div class="k">FEC 恢复成功率</div><div class="v">{{pct .Derived.FECSuccessRatio}}</div><div class="s">窗口内 recovered/(recovered+errs)</div></div>
   <div class="card"><div class="k">上游陈旧度</div><div class="v">{{stale .Derived.StaleSeconds}}</div></div>
 </div>
 
-<h2>趋势 <span class="muted">最近 {{.SampleCount}} 个采样点</span></h2>
+<h2>趋势 <span class="muted">最近 {{.SampleCount}} 个采样点 · 每行两张</span></h2>
+<div class="charts">
 {{range .Charts}}
 <section class="chart-box">
   <h3>{{.Title}}</h3>
@@ -84,6 +88,7 @@
   {{.SVG}}
 </section>
 {{end}}
+</div>
 
 <h2>链路明细</h2>
 <table>

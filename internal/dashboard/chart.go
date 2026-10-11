@@ -19,6 +19,8 @@ const (
 	KindPercent
 	// KindPer1k 是「每千条流的次数」这类小数值。
 	KindPer1k
+	// KindCount 是计数（每个采样点发生的次数），用整数刻度。
+	KindCount
 )
 
 // ChartSeries 是一条折线；Values 与 ChartSpec.Times 一一对应，nil 表示该点缺失（断开）。
@@ -187,6 +189,8 @@ func formatValue(v float64, kind ValueKind) string {
 		return fmt.Sprintf("%.2f%%", v*100)
 	case KindPer1k:
 		return fmt.Sprintf("%.2f", v)
+	case KindCount:
+		return fmt.Sprintf("%.0f", v)
 	default:
 		return metrics.HumanRate(v)
 	}

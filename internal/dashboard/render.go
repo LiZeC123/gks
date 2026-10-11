@@ -9,7 +9,8 @@ import (
 	"github.com/LiZeC123/gks/internal/metrics"
 )
 
-// 折线配色：上行（载荷蓝 / 线红）、下行（载荷绿 / 线橙）、重传紫、错误红。
+// 折线配色：上行（载荷蓝 / 线红）、下行（载荷绿 / 线橙）、重传紫、错误红、
+// 会话回收（沉默判活红 / GOAWAY 青）。
 const (
 	colorPayloadUp   = "#2563eb"
 	colorWireUp      = "#dc2626"
@@ -17,6 +18,8 @@ const (
 	colorWireDown    = "#d97706"
 	colorRetrans     = "#7c3aed"
 	colorErrors      = "#be123c"
+	colorReapSilence = "#be123c"
+	colorGoAway      = "#0891b2"
 )
 
 // staleFactor 决定「多久没拉到数据算陈旧」：拉取间隔的 3 倍。
@@ -146,8 +149,8 @@ func upstreamAlarms(snap Snapshot) []string {
 	return latest.Metrics.Alarms
 }
 
-// buildCharts 由样本环生成四张折线图：
-// 上行（载荷 vs 线）、下行（载荷 vs 线）、重传率、错误率（每千条流）。
+// buildCharts 由样本环生成五张折线图：
+// 上行（载荷 vs 线）、下行（载荷 vs 线）、重传率、错误率（每千条流）、会话回收（沉默判活 vs GOAWAY）。
 func buildCharts(samples []Sample) []Chart {
 	if len(samples) == 0 {
 		return nil
@@ -159,6 +162,8 @@ func buildCharts(samples []Sample) []Chart {
 	downWire := make([]*float64, len(samples))
 	retrans := make([]*float64, len(samples))
 	errors := make([]*float64, len(samples))
+	reaped := make([]*float64, len(samples))
+	goAway := make([]*float64, len(samples))
 
 	for i, s := range samples {
 		times[i] = s.Received
@@ -168,6 +173,8 @@ func buildCharts(samples []Sample) []Chart {
 		downWire[i] = s.Metrics.Wire.RecvBps
 		retrans[i] = s.RetransRatio()
 		errors[i] = s.ErrorsPer1k()
+		reaped[i] = countValue(s.ReapedDelta)
+		goAway[i] = countValue(s.GoAwayDelta)
 	}
 	latest := samples[len(samples)-1]
 	return []Chart{
@@ -189,7 +196,19 @@ func buildCharts(samples []Sample) []Chart {
 			"面板用相邻样本的累计错误数差分后按每千条流折算；该窗口内没有新流时曲线断开。",
 			KindPer1k, times,
 			ChartSeries{Name: "错误/千条流", Color: colorErrors, Values: errors}),
+		newChart("会话回收（每采样点）",
+			"红色是「对端沉默、被本端判活回收」的会话数（客户端不告而别）；青色是收到 GOAWAY 的会话数"+
+				"（对端主动告别）。两条都贴着 0 说明会话都走了优雅路径。",
+			KindCount, times,
+			ChartSeries{Name: "沉默判活回收", Color: colorReapSilence, Values: reaped},
+			ChartSeries{Name: "收到 GOAWAY", Color: colorGoAway, Values: goAway}),
 	}
+}
+
+// countValue 把计数转成图表用的指针值；0 也照常画（贴底），便于看出「一直为 0」。
+func countValue(v uint64) *float64 {
+	f := float64(v)
+	return &f
 }
 
 func newChart(title, note string, kind ValueKind, times []time.Time, series ...ChartSeries) Chart {
