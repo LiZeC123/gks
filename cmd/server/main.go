@@ -125,7 +125,8 @@ func run() error {
 		"console", console,
 	)
 
-	// 服务端不发心跳，只响应 PING；保活由客户端负责。
+	// 服务端不发心跳，只响应 PING；保活由客户端负责，服务端侧只做被动判活：
+	// 连续 5×common.heartbeat.interval（默认 100s）没有任何入站帧就回收该会话。
 	handler := server.NewHandler(server.HandlerConfig{
 		SessionOptions: mux.Options{
 			PSK:                psk,
@@ -134,6 +135,7 @@ func run() error {
 			TimestampWindow:    cfg.Server.Auth.TimestampWindow.D(),
 			ReplayCache:        replay,
 			StreamStallTimeout: cfg.Common.Stream.RecvStallTimeout.D(),
+			PeerSilenceTimeout: cfg.Common.Heartbeat.SilenceTimeout(),
 			MaxStreams:         cfg.Common.Limits.MaxStreamsPerSession,
 			MaxDataPayload:     cfg.Common.Limits.MaxDataPayload,
 			MaxFrameBody:       cfg.Common.Limits.MaxFrameBody,

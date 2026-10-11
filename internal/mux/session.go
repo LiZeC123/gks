@@ -27,6 +27,8 @@ var (
 	ErrHeartbeatTimeout = errors.New("mux: 心跳超时，会话失效")
 	// ErrAuthTimeout 表示认证握手超时。
 	ErrAuthTimeout = errors.New("mux: 认证握手超时")
+	// ErrSessionSilence 表示对端长时间没有任何入站帧，判定会话失效（被动判活）。
+	ErrSessionSilence = errors.New("mux: 对端沉默超时，会话失效")
 	// ErrUnexpectedFrame 表示握手阶段收到非预期帧类型。
 	ErrUnexpectedFrame = errors.New("mux: 握手阶段收到非预期帧")
 	// ErrNoPSK 表示缺少 PSK。
@@ -81,6 +83,12 @@ type Options struct {
 	HeartbeatInterval time.Duration
 	// HeartbeatMiss 是连续未收到 PONG 的次数上限，默认 3。
 	HeartbeatMiss int
+	// PeerSilenceTimeout > 0 时启用「被动判活」：连续这么久没有收到任何完整入站帧，就判定
+	// 对端已经消失并回收会话（不发送任何额外流量）。0 表示关闭。
+	//
+	// 服务端用它兜住「客户端进程消失、断电、网络分区」等连 GOAWAY 都发不出来的情形；客户端的
+	// 判活由自己的心跳承担，因此不必启用。阈值口径见 config.Heartbeat.SilenceTimeout()。
+	PeerSilenceTimeout time.Duration
 	// WriteQueue 是发送队列长度，默认 1024。
 	WriteQueue int
 	// StreamStallTimeout 是单流接收缓冲被写满后允许的最长阻塞时间；
@@ -202,6 +210,11 @@ type Session struct {
 	nextStreamID uint32
 
 	hb *heartbeatState
+
+	// t0 是会话建立时刻；lastRecv 是「距 t0 的纳秒数」，在收到任何完整入站帧时刷新。
+	// 两者都用 time.Since 的单调读数，避免系统时钟跳变导致误判沉默。
+	t0       time.Time
+	lastRecv atomic.Int64
 
 	wg sync.WaitGroup
 
@@ -428,12 +441,18 @@ func (s *Session) start() {
 	)
 	s.opts.Metrics.SessionsActive.Add(1)
 	s.opts.Metrics.SessionsTotal.Add(1)
+	// 被动判活的计时从会话进入安全态开始。
+	s.t0 = time.Now()
 	s.wg.Add(2)
 	go s.readLoop()
 	go s.writeLoop()
 	if s.opts.HeartbeatInterval > 0 {
 		s.wg.Add(1)
 		go s.heartbeatLoop()
+	}
+	if s.opts.PeerSilenceTimeout > 0 {
+		s.wg.Add(1)
+		go s.silenceLoop()
 	}
 }
 
@@ -453,8 +472,56 @@ func (s *Session) readLoop() {
 			return
 		}
 		s.framesIn.Add(1)
+		// 任何完整入站帧都算「对端还活着」（不只是 PING）：主动判活的会话里，DATA 与心跳
+		// 都可能先到，只认 PING 会在对端不心跳时误杀。
+		if s.opts.PeerSilenceTimeout > 0 {
+			s.lastRecv.Store(int64(time.Since(s.t0)))
+		}
 		s.dispatch(f)
 	}
+}
+
+// silenceLoop 是被动判活：连续 PeerSilenceTimeout 没有收到任何入站帧就回收会话。
+//
+// 与 heartbeatLoop 的区别：本循环不发送任何帧，只是观察对端是否还在说话，因此不改变服务端的
+// 流量特征。检测粒度由 silenceCheckInterval 决定，实际回收时间 = PeerSilenceTimeout + 一个检查周期。
+func (s *Session) silenceLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(s.silenceCheckInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-ticker.C:
+			silent := time.Since(s.t0) - time.Duration(s.lastRecv.Load())
+			if silent <= s.opts.PeerSilenceTimeout {
+				continue
+			}
+			s.log.Warn("对端沉默超时，回收会话",
+				log.Event, "session_silence",
+				"silent", silent.String(),
+				"timeout", s.opts.PeerSilenceTimeout.String(),
+				"frames_in", s.framesIn.Load(),
+			)
+			s.closeWith(ErrSessionSilence)
+			return
+		}
+	}
+}
+
+// silenceCheckInterval 由阈值推导检查周期：取 1/4 并限制在 [50ms, 5s]。
+//
+// 上界 5s 让长时间阈值（默认 100s）也不会因为检查过密而空转；下界保证测试能用小阈值观察。
+func (s *Session) silenceCheckInterval() time.Duration {
+	d := s.opts.PeerSilenceTimeout / 4
+	if d > 5*time.Second {
+		d = 5 * time.Second
+	}
+	if d < 50*time.Millisecond {
+		d = 50 * time.Millisecond
+	}
+	return d
 }
 
 // dispatch 分发一帧。

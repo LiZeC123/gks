@@ -98,6 +98,13 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if got := cfg.Common.Heartbeat.SilenceTimeout(); got != 100*time.Second {
 		t.Fatalf("服务端沉默判死阈值 = %s（期望 5×interval = 100s）", got)
 	}
+	// 不变量：服务端的沉默阈值必须晚于客户端自身的判死时刻（miss 次抖动后的间隔），
+	// 否则服务端会先杀掉仍然健康的会话。
+	clientDeadline := time.Duration(float64(cfg.Common.Heartbeat.Interval.D())*1.25) * time.Duration(cfg.Common.Heartbeat.Miss)
+	if cfg.Common.Heartbeat.SilenceTimeout() <= clientDeadline {
+		t.Fatalf("沉默阈值 %s 必须大于客户端判死上限 %s",
+			cfg.Common.Heartbeat.SilenceTimeout(), clientDeadline)
+	}
 	if cfg.Common.Limits.MaxFrameBody != protocol.MaxFrameBody {
 		t.Fatalf("common.limits.max_frame_body = %d", cfg.Common.Limits.MaxFrameBody)
 	}
