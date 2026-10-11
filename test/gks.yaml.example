@@ -31,7 +31,12 @@ common:
     data_shards: 10                  # FEC：10 数据 + 3 校验（0 = 关闭）
     parity_shards: 3                 # 丢包链路建议开启（线开销约 +30%，换来免重传的低抖动）
   stream:
-    idle_timeout: 600s               # 流长时间无数据则 RST
+    recv_stall_timeout: 600s         # 单流接收缓冲写满后容忍下层不消费的上限（超过对该流 RST）
+                                     #   注意：不是空闲计时器——缓冲没满的空闲流不会过期
+  heartbeat:
+    interval: 20s                    # 客户端据此发 PING（实际在 15s~25s 间抖动）
+                                     #   服务端不发 PING，据此推导沉默判死阈值 = 5×interval = 100s
+    miss: 3                          # 客户端连续未收到 PONG 的次数上限（服务端不使用）
   limits:
     max_streams_per_session: 256     # 客户端开流上限 = 服务端接受上限
     max_frame_body: 65536            # 超过即断开（防伪造长度挂起）
@@ -56,8 +61,6 @@ client:
     backoff_max: 30s                 # 重建指数退避上限
   kcp:
     server: "127.0.0.1:4000"         # 服务端 KCP/UDP 地址
-    heartbeat_interval: 20s          # 实际在 15s~25s 间抖动
-    heartbeat_miss: 3                # 连续未收到 PONG 的次数上限
     auth_timeout: 5s                 # 等待 AUTH_RESP
   shutdown_grace: 30s
   metrics:

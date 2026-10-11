@@ -83,9 +83,9 @@ type Options struct {
 	HeartbeatMiss int
 	// WriteQueue 是发送队列长度，默认 1024。
 	WriteQueue int
-	// StreamIdleTimeout 是单流接收缓冲被写满后允许的最长阻塞时间；
+	// StreamStallTimeout 是单流接收缓冲被写满后允许的最长阻塞时间；
 	// 超过则重置该流（RST）以保护整条会话（dev.md §3.7）。默认 600s。
-	StreamIdleTimeout time.Duration
+	StreamStallTimeout time.Duration
 	// MaxStreams 是单会话流数上限，默认 256。
 	MaxStreams int
 	// MaxDataPayload 是单帧 DATA 的 Payload 上限，默认 protocol.MaxDataPayload。
@@ -122,8 +122,8 @@ func (o *Options) normalize() error {
 	if o.WriteQueue <= 0 {
 		o.WriteQueue = 1024
 	}
-	if o.StreamIdleTimeout <= 0 {
-		o.StreamIdleTimeout = 600 * time.Second
+	if o.StreamStallTimeout <= 0 {
+		o.StreamStallTimeout = 600 * time.Second
 	}
 	if o.MaxStreams <= 0 {
 		o.MaxStreams = 256

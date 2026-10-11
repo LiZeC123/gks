@@ -80,16 +80,16 @@ func run() error {
 	})
 
 	sessOpts := mux.Options{
-		PSK:               psk,
-		AEAD:              cfg.Common.AEADName(),
-		AuthTimeout:       cfg.Client.KCP.AuthTimeout.D(),
-		HeartbeatInterval: cfg.Client.KCP.HeartbeatInterval.D(),
-		HeartbeatMiss:     cfg.Client.KCP.HeartbeatMiss,
-		StreamIdleTimeout: cfg.Common.Stream.IdleTimeout.D(),
-		MaxStreams:        cfg.Common.Limits.MaxStreamsPerSession,
-		MaxDataPayload:    cfg.Common.Limits.MaxDataPayload,
-		MaxFrameBody:      cfg.Common.Limits.MaxFrameBody,
-		Logger:            logger,
+		PSK:                psk,
+		AEAD:               cfg.Common.AEADName(),
+		AuthTimeout:        cfg.Client.KCP.AuthTimeout.D(),
+		HeartbeatInterval:  cfg.Common.Heartbeat.Interval.D(),
+		HeartbeatMiss:      cfg.Common.Heartbeat.Miss,
+		StreamStallTimeout: cfg.Common.Stream.RecvStallTimeout.D(),
+		MaxStreams:         cfg.Common.Limits.MaxStreamsPerSession,
+		MaxDataPayload:     cfg.Common.Limits.MaxDataPayload,
+		MaxFrameBody:       cfg.Common.Limits.MaxFrameBody,
+		Logger:             logger,
 	}
 
 	// 会话池：保底 pool.size 条已认证会话，供本地连接复用（同一时刻每条会话 1 条流）。
@@ -163,7 +163,7 @@ func run() error {
 		"server", cfg.Client.KCP.Server,
 		"crypt", cfg.Common.CryptName(),
 		"aead", cfg.Common.AEADName(),
-		"heartbeat_interval", cfg.Client.KCP.HeartbeatInterval.D().String(),
+		"heartbeat_interval", cfg.Common.Heartbeat.Interval.D().String(),
 		"metrics_listen", metricsListen,
 		"metrics_interval", cfg.Common.MetricsInterval.D().String(),
 		"log_file", cfg.Client.Log.File,

@@ -165,8 +165,8 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 
 | 段 | 用途 |
 | --- | --- |
-| `common` | 两端必须一致的参数（PSK、加密算法、KCP 调参、FEC、上限、统计刷新周期）——只写一次 |
-| `client` | 本地 SOCKS5 监听、连接池、服务端地址、心跳、统计端点、日志 |
+| `common` | 两端必须一致的参数（PSK、加密算法、KCP 调参、FEC、心跳口径、上限、统计刷新周期）——只写一次 |
+| `client` | 本地 SOCKS5 监听、连接池、服务端地址、统计端点、日志 |
 | `server` | KCP 监听、认证窗口、拨号超时、统计端点、日志 |
 
 要点：
@@ -190,7 +190,8 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `common.kcp.mtu` | `1350` | 576~1400，避免 IP 分片 |
 | `common.kcp.sndwnd` / `rcvwnd` | `256` | 32~4096 |
 | `common.kcp.data_shards` / `parity_shards` | `10` / `3` | FEC；置 `0`/`0` 关闭。丢包链路才值得开 |
-| `common.stream.idle_timeout` | `600s` | 流长时间无数据则 RST |
+| `common.stream.recv_stall_timeout` | `600s` | 单流接收缓冲写满后容忍下层不消费的上限，超过对该流 RST；**不是空闲计时器** |
+| `common.heartbeat.interval` / `miss` | `20s` / `3` | 心跳间隔（±25% 抖动）与客户端判死次数；服务端据此推导沉默判死阈值 `5×interval` = `100s` |
 | `common.limits.max_streams_per_session` | `256` | 单会话开流上限 |
 | `common.limits.max_frame_body` / `max_data_payload` | `65536` / `16384` | 帧体上限 / 单帧载荷上限（发送方据此拆帧） |
 | `common.metrics_interval` | `1s` | 控制台表格刷新周期 + `/metrics` 默认速率窗口；必须 > 0 且 ≤ `10m` |
@@ -203,7 +204,6 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `client.pool.startup_jitter` | `300ms` | 启动错峰 |
 | `client.pool.connect_timeout` | `5s` | 排队等待可用会话的上限，超时回 SOCKS5 `0x01` |
 | `client.pool.backoff_min` / `backoff_max` | `500ms` / `30s` | 会话重建退避 |
-| `client.kcp.heartbeat_interval` / `heartbeat_miss` | `20s` / `3` | 心跳间隔（±25% 抖动）与判死次数 |
 | `client.kcp.auth_timeout` | `5s` | 等待 `AUTH_RESP` |
 | `server.auth.timestamp_window` | `60s` | 允许的时钟偏差/重放窗口 |
 | `server.auth.max_pending_sessions` | `1024` | 未认证会话并发上限 |

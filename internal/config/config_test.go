@@ -86,8 +86,17 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if got := cfg.Common.KCP.SndWnd; got != 256 {
 		t.Fatalf("common.kcp.sndwnd = %d", got)
 	}
-	if got := cfg.Common.Stream.IdleTimeout.D(); got != 600*time.Second {
-		t.Fatalf("common.stream.idle_timeout = %s", got)
+	if got := cfg.Common.Stream.RecvStallTimeout.D(); got != 600*time.Second {
+		t.Fatalf("common.stream.recv_stall_timeout = %s", got)
+	}
+	if got := cfg.Common.Heartbeat.Interval.D(); got != 20*time.Second {
+		t.Fatalf("common.heartbeat.interval = %s", got)
+	}
+	if got := cfg.Common.Heartbeat.Miss; got != 3 {
+		t.Fatalf("common.heartbeat.miss = %d", got)
+	}
+	if got := cfg.Common.Heartbeat.SilenceTimeout(); got != 100*time.Second {
+		t.Fatalf("服务端沉默判死阈值 = %s（期望 5×interval = 100s）", got)
 	}
 	if cfg.Common.Limits.MaxFrameBody != protocol.MaxFrameBody {
 		t.Fatalf("common.limits.max_frame_body = %d", cfg.Common.Limits.MaxFrameBody)
@@ -111,9 +120,6 @@ func TestExampleConfigIsValid(t *testing.T) {
 	}
 	if cfg.Client.KCP.Server != "127.0.0.1:4000" {
 		t.Fatalf("client.kcp.server = %q", cfg.Client.KCP.Server)
-	}
-	if got := cfg.Client.KCP.HeartbeatInterval.D(); got != 20*time.Second {
-		t.Fatalf("client.kcp.heartbeat_interval = %s", got)
 	}
 	if got := cfg.Client.Pool.StartupJitter.D(); got != 300*time.Millisecond {
 		t.Fatalf("client.pool.startup_jitter = %s", got)
@@ -182,7 +188,11 @@ func TestConsistencyFieldsMustBeInCommon(t *testing.T) {
 `,
 		"client.stream": `client:
   stream:
-    idle_timeout: 600s
+    recv_stall_timeout: 600s
+`,
+		"client.heartbeat": `client:
+  heartbeat:
+    interval: 20s
 `,
 		"server.limits": `server:
   limits:
@@ -286,9 +296,15 @@ func TestCommonValidateErrors(t *testing.T) {
 		{"aead 未知", func(s string) string {
 			return strings.Replace(s, `aead: "chacha20-poly1305"`, `aead: "rot13"`, 1)
 		}, "common.aead"},
-		{"stream.idle_timeout 为 0", func(s string) string {
-			return strings.Replace(s, "idle_timeout: 600s", "idle_timeout: 0s", 1)
-		}, "common.stream.idle_timeout"},
+		{"stream.recv_stall_timeout 为 0", func(s string) string {
+			return strings.Replace(s, "recv_stall_timeout: 600s", "recv_stall_timeout: 0s", 1)
+		}, "common.stream.recv_stall_timeout"},
+		{"heartbeat.interval 为 0", func(s string) string {
+			return strings.Replace(s, "interval: 20s", "interval: 0s", 1)
+		}, "common.heartbeat.interval"},
+		{"heartbeat.miss 为 0", func(s string) string {
+			return strings.Replace(s, "miss: 3", "miss: 0", 1)
+		}, "common.heartbeat.miss"},
 		{"max_streams_per_session 越界", func(s string) string {
 			return strings.Replace(s, "max_streams_per_session: 256", "max_streams_per_session: 999999", 1)
 		}, "common.limits.max_streams_per_session"},
@@ -359,12 +375,6 @@ func TestClientValidateErrors(t *testing.T) {
 		{"backoff_max 小于 min", func(s string) string {
 			return strings.Replace(s, "backoff_max: 30s", "backoff_max: 100ms", 1)
 		}, "client.pool.backoff_max"},
-		{"heartbeat_interval 为 0", func(s string) string {
-			return strings.Replace(s, "heartbeat_interval: 20s", "heartbeat_interval: 0s", 1)
-		}, "client.kcp.heartbeat_interval"},
-		{"heartbeat_miss 为 0", func(s string) string {
-			return strings.Replace(s, "heartbeat_miss: 3", "heartbeat_miss: 0", 1)
-		}, "client.kcp.heartbeat_miss"},
 		{"auth_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "auth_timeout: 5s", "auth_timeout: 0s", 1)
 		}, "client.kcp.auth_timeout"},

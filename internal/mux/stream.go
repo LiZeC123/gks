@@ -432,10 +432,10 @@ func (s *Session) deliverData(f protocol.Frame) {
 			log.Event, "orphan_data", log.StreamID, f.StreamID, "bytes", len(f.Payload))
 		return
 	}
-	if !st.deliver(f.Payload, s.opts.StreamIdleTimeout) {
+	if !st.deliver(f.Payload, s.opts.StreamStallTimeout) {
 		s.log.Warn("流接收缓冲长时间满，重置该流",
 			log.Event, "stream_stalled", log.StreamID, f.StreamID,
-			"timeout", s.opts.StreamIdleTimeout.String())
+			"timeout", s.opts.StreamStallTimeout.String())
 		st.forceReset(ErrStreamRecvStalled)
 	}
 }

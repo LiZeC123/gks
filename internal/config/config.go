@@ -67,8 +67,10 @@ type Common struct {
 	AEAD  string `yaml:"aead"`
 	// KCP 是两端的 KCP 调参。
 	KCP KCPTuning `yaml:"kcp"`
-	// Stream 是流级策略（两端对「流空闲多久算死」的口径一致）。
+	// Stream 是流级策略（两端对「接收缓冲写满后容忍多久」的口径一致）。
 	Stream Stream `yaml:"stream"`
+	// Heartbeat 是会话保活口径：客户端据此发 PING，服务端据此推导沉默判死阈值。
+	Heartbeat Heartbeat `yaml:"heartbeat"`
 	// Limits 是帧与流的上限：发送方必须遵守，接收方据此校验。
 	Limits Limits `yaml:"limits"`
 	// MetricsInterval 是控制台表格的刷新周期，同时也是端点 /metrics 不带 window 参数时的
@@ -88,7 +90,31 @@ type KCPTuning struct {
 
 // Stream 是流级策略。
 type Stream struct {
-	IdleTimeout Duration `yaml:"idle_timeout"`
+	// RecvStallTimeout 是单流接收缓冲被写满后，允许下层不消费的最长时间；
+	// 超过则对该流发 RST（保护整条会话不被单流拖死）。
+	//
+	// 注意：它不是「空闲计时器」——缓冲没满、或数据被及时消费的空闲流不会过期。
+	RecvStallTimeout Duration `yaml:"recv_stall_timeout"`
+}
+
+// Heartbeat 是会话保活口径（两端共用）。
+//
+// 客户端按 Interval 周期发送 PING（间隔带 ±25% 抖动），Miss 次未收到 PONG 即判定会话失效；
+// 服务端不发 PING，只用 Interval 推导「对端沉默多久算死」的阈值。由于服务端的判活完全建立在
+// 客户端的心跳节奏上，这个口径必须两端一致，因此放在 common 而不是 client。
+type Heartbeat struct {
+	Interval Duration `yaml:"interval"`
+	// Miss 是客户端连续未收到 PONG 的次数上限（服务端不使用）。
+	Miss int `yaml:"miss"`
+}
+
+// SilenceTimeout 返回服务端的沉默判死阈值：4 倍「抖动后的最大心跳间隔」。
+//
+// 抖动上限为 1.25×Interval，故阈值为 5×Interval（默认 20s → 100s）。客户端自身按
+// Miss 次未收 PONG 判死（≈3×Interval，45s~75s），先于本阈值触发；服务端这一层只用于
+// 客户端进程消失、机器断电、网络分区等「连 GOAWAY 都发不出来」的情形，所以留足余量避免误判。
+func (h Heartbeat) SilenceTimeout() time.Duration {
+	return 5 * h.Interval.D()
 }
 
 // Limits 是单会话的上限。
@@ -113,13 +139,11 @@ type Client struct {
 	Log           Log        `yaml:"log"`
 }
 
-// ClientKCP 是客户端侧的连接与保活参数（KCP 调参在 common.kcp）。
+// ClientKCP 是客户端侧的连接与保活参数（KCP 调参在 common.kcp，心跳在 common.heartbeat）。
 type ClientKCP struct {
 	// Server 是服务端的 KCP/UDP 地址。
-	Server            string   `yaml:"server"`
-	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
-	HeartbeatMiss     int      `yaml:"heartbeat_miss"`
-	AuthTimeout       Duration `yaml:"auth_timeout"`
+	Server      string   `yaml:"server"`
+	AuthTimeout Duration `yaml:"auth_timeout"`
 }
 
 // ClientAuth 是本地 SOCKS5 的认证设置。本版仅支持 none。
@@ -293,7 +317,9 @@ func (c *Common) Validate() error {
 	validateAEAD(p, "common.aead", c.AEAD)
 	validateKCPTuning(p, "common.kcp", &c.KCP)
 
-	p.require(c.Stream.IdleTimeout.D() > 0, "common.stream.idle_timeout: 必须大于 0")
+	p.require(c.Stream.RecvStallTimeout.D() > 0, "common.stream.recv_stall_timeout: 必须大于 0")
+	p.require(c.Heartbeat.Interval.D() > 0, "common.heartbeat.interval: 必须大于 0")
+	p.require(c.Heartbeat.Miss >= 1, "common.heartbeat.miss: 必须不小于 1")
 	p.require(c.MetricsInterval.D() > 0,
 		"common.metrics_interval: 必须大于 0（控制台刷新周期与端点默认速率窗口）")
 	p.require(c.MetricsInterval.D() <= metrics.Retention,
@@ -341,8 +367,6 @@ func (c *Client) Validate() error {
 	p.require(c.Pool.BackoffMax.D() >= c.Pool.BackoffMin.D(),
 		"client.pool.backoff_max: 不能小于 backoff_min")
 
-	p.require(c.KCP.HeartbeatInterval.D() > 0, "client.kcp.heartbeat_interval: 必须大于 0")
-	p.require(c.KCP.HeartbeatMiss >= 1, "client.kcp.heartbeat_miss: 必须不小于 1")
 	p.require(c.KCP.AuthTimeout.D() > 0, "client.kcp.auth_timeout: 必须大于 0")
 
 	p.require(c.ShutdownGrace.D() > 0, "client.shutdown_grace: 必须大于 0")

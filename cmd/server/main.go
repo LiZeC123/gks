@@ -125,19 +125,19 @@ func run() error {
 		"console", console,
 	)
 
-	// 服务端不发心跳（配置中没有该字段），只响应 PING；保活由客户端负责。
+	// 服务端不发心跳，只响应 PING；保活由客户端负责。
 	handler := server.NewHandler(server.HandlerConfig{
 		SessionOptions: mux.Options{
-			PSK:               psk,
-			AEAD:              cfg.Common.AEADName(),
-			AuthTimeout:       cfg.Server.Auth.AuthTimeout.D(),
-			TimestampWindow:   cfg.Server.Auth.TimestampWindow.D(),
-			ReplayCache:       replay,
-			StreamIdleTimeout: cfg.Common.Stream.IdleTimeout.D(),
-			MaxStreams:        cfg.Common.Limits.MaxStreamsPerSession,
-			MaxDataPayload:    cfg.Common.Limits.MaxDataPayload,
-			MaxFrameBody:      cfg.Common.Limits.MaxFrameBody,
-			Logger:            logger,
+			PSK:                psk,
+			AEAD:               cfg.Common.AEADName(),
+			AuthTimeout:        cfg.Server.Auth.AuthTimeout.D(),
+			TimestampWindow:    cfg.Server.Auth.TimestampWindow.D(),
+			ReplayCache:        replay,
+			StreamStallTimeout: cfg.Common.Stream.RecvStallTimeout.D(),
+			MaxStreams:         cfg.Common.Limits.MaxStreamsPerSession,
+			MaxDataPayload:     cfg.Common.Limits.MaxDataPayload,
+			MaxFrameBody:       cfg.Common.Limits.MaxFrameBody,
+			Logger:             logger,
 		},
 		DialTimeout: cfg.Server.Dial.Timeout.D(),
 		Keepalive:   cfg.Server.Dial.Keepalive.D(),

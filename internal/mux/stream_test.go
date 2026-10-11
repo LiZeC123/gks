@@ -314,7 +314,7 @@ func TestSessionCloseResetsStreams(t *testing.T) {
 // TestStreamRecvStallResetsStream 验证：接收缓冲长时间满时重置该流而不是卡死会话。
 func TestStreamRecvStallResetsStream(t *testing.T) {
 	cli, srv := newSessionPair(t, func(o *Options) {
-		o.StreamIdleTimeout = 200 * time.Millisecond
+		o.StreamStallTimeout = 200 * time.Millisecond
 		o.MaxDataPayload = 16 * 1024
 	})
 

@@ -111,13 +111,13 @@ func startHarness(t *testing.T) *harness {
 	}
 	srvHandler := server.NewHandler(server.HandlerConfig{
 		SessionOptions: mux.Options{
-			PSK:               testPSK,
-			AEAD:              protocol.AEADChaCha20Poly1305,
-			AuthTimeout:       3 * time.Second,
-			TimestampWindow:   time.Minute,
-			ReplayCache:       replay,
-			StreamIdleTimeout: 5 * time.Second,
-			Logger:            quiet,
+			PSK:                testPSK,
+			AEAD:               protocol.AEADChaCha20Poly1305,
+			AuthTimeout:        3 * time.Second,
+			TimestampWindow:    time.Minute,
+			ReplayCache:        replay,
+			StreamStallTimeout: 5 * time.Second,
+			Logger:             quiet,
 		},
 		DialTimeout: 5 * time.Second,
 		Keepalive:   30 * time.Second,
@@ -130,14 +130,14 @@ func startHarness(t *testing.T) *harness {
 	}
 	reg := &metrics.Registry{}
 	cliSessOpts := mux.Options{
-		PSK:               testPSK,
-		AEAD:              protocol.AEADChaCha20Poly1305,
-		AuthTimeout:       3 * time.Second,
-		HeartbeatInterval: time.Second,
-		HeartbeatMiss:     3,
-		StreamIdleTimeout: 5 * time.Second,
-		Logger:            quiet,
-		Metrics:           reg,
+		PSK:                testPSK,
+		AEAD:               protocol.AEADChaCha20Poly1305,
+		AuthTimeout:        3 * time.Second,
+		HeartbeatInterval:  time.Second,
+		HeartbeatMiss:      3,
+		StreamStallTimeout: 5 * time.Second,
+		Logger:             quiet,
+		Metrics:            reg,
 	}
 	dialer := transport.NewDialer(testTransportOptions())
 	pool := client.NewSessionPool(client.PoolConfig{
