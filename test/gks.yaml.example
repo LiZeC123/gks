@@ -20,9 +20,13 @@
 
 common:
   psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
-  crypt: "none"                      # none（默认）| aes-128-gcm | aes-256-gcm | aes-128 | aes-256 | salsa20
-                                     # 开启后连 KCP 头也被加密（隐藏协议指纹），每包多 28B 开销
-  aead: "chacha20-poly1305"          # chacha20-poly1305 | aes-256-gcm
+  crypt: "aes-256-gcm"               # 传输层加密（默认 aes-256-gcm）：连 KCP 头也被加密，隐藏协议指纹
+                                     #   可选 aes-128-gcm | none | aes-128 | aes-256 | salsa20（每包多 28B 开销）
+                                     #   ★ 只建议用 aes-256-gcm / aes-128-gcm：另外三个（含 none）都不提供完整性——
+                                     #     none 时协议可被识别且可被在路径上注入打断会话，CFB 系列（aes-128/
+                                     #     aes-256/salsa20）用 CRC32 当校验和，不是 MAC。这三种会在启动时告警。
+                                     #   两端必须一致：只升级一端会直接连不上
+  aead: "chacha20-poly1305"          # chacha20-poly1305 | aes-256-gcm（AUTH 之后的帧加密，与应用层配对）
   kcp:
     interval: 10ms                   # 刷新间隔
     mtu: 1350                        # 避免 IP 分片

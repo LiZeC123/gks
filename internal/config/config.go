@@ -62,7 +62,11 @@ type Config struct {
 // （PSK/crypt/aead 不一致会导致握手或解密失败），因此只在 common 段写一次。
 type Common struct {
 	// PSK 是 base64 编码的 32 字节预共享密钥。
-	PSK   string `yaml:"psk"`
+	PSK string `yaml:"psk"`
+	// Crypt 是传输层加密算法；留空即 DefaultCryptName（aes-256-gcm）。
+	//
+	// 默认开启而不是默认 none：crypt=none 时 KCP 头与帧的明文头都在线上，抓到包的人
+	// 可以直接确认协议身份，也能在路径上注入伪造段打断会话。写 "none" 可显式关闭。
 	Crypt string `yaml:"crypt"`
 	AEAD  string `yaml:"aead"`
 	// KCP 是两端的 KCP 调参。
@@ -257,8 +261,14 @@ const (
 	MaxStreamsPerSess = 32768
 	MaxPoolSessions   = 128
 	// MaxFECShards 是 reedsolomon 允许的分片总数上限（data+parity）。
-	MaxFECShards      = 256
-	AllowedCryptNames = "none|aes-128-gcm|aes-256-gcm|aes-128|aes-256|salsa20"
+	MaxFECShards = 256
+	// DefaultCryptName 是未显式配置 common.crypt 时使用的传输层加密算法。
+	//
+	// 默认开启而非 none：crypt=none 时 KCP 头与帧的明文头（magic/version/length）都在线上，
+	// 抓到包即可确认协议身份，在路径上的攻击者还能注入伪造段直接打断会话。默认取 GCM 是
+	// 因为它有完整性（AEAD）；CFB 系列（aes-128/aes-256/salsa20）不取，见 InsecureCryptWarning。
+	DefaultCryptName  = "aes-256-gcm"
+	AllowedCryptNames = "aes-256-gcm|aes-128-gcm|none|aes-128|aes-256|salsa20"
 	LocalAuthNone     = "none"
 	LocalAuthUserPass = "userpass"
 )
@@ -405,7 +415,7 @@ func (c *Common) PSKBytes() ([]byte, error) {
 	return psk, nil
 }
 
-// CryptName 返回规范化后的传输层加密算法名（空值即 none）。
+// CryptName 返回规范化后的传输层加密算法名（空值即 DefaultCryptName）。
 func (c *Common) CryptName() string { return normalizeCrypt(c.Crypt) }
 
 // AEADName 返回规范化后的应用层 AEAD 算法名。
@@ -421,9 +431,29 @@ func (l Log) LevelOrDefault() string {
 
 func normalizeCrypt(name string) string {
 	if name == "" {
-		return "none"
+		return DefaultCryptName
 	}
 	return name
+}
+
+// InsecureCryptWarning 返回传输层加密配置的安全告警；空串表示无需告警。
+//
+// 两类值会被提示，但都仍然受支持（写 "none" 是显式的自担风险选择）：
+//
+//   - none：KCP 头与帧的明文头都在线上。抓到包即可识别协议，且在路径上的攻击者可注入
+//     伪造段（gks 遇到解密失败一律断开、不降级）直接打断会话。
+//   - aes-128 / aes-256 / salsa20：kcp-go 走 CFB + CRC32 的遗留路径，CRC32 是校验和、
+//     不是 MAC，因此只有机密性、没有完整性（同 WEP 时代 CRC32 位翻转攻击的原理）。
+func InsecureCryptWarning(name string) string {
+	switch normalizeCrypt(name) {
+	case "none":
+		return "common.crypt=none：KCP 头与帧明文头都在线上，协议可被识别，且可被在路径上注入打断会话"
+	case "aes-128", "aes-256", "salsa20":
+		return fmt.Sprintf("common.crypt=%s：CFB+CRC32 不提供完整性保护（CRC32 不是 MAC），建议改用 %s",
+			normalizeCrypt(name), DefaultCryptName)
+	default:
+		return ""
+	}
 }
 
 func normalizeAEAD(name string) string {

@@ -114,8 +114,8 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if cfg.Common.Limits.MaxStreamsPerSession != 256 {
 		t.Fatalf("common.limits.max_streams_per_session = %d", cfg.Common.Limits.MaxStreamsPerSession)
 	}
-	if cfg.Common.CryptName() != "none" {
-		t.Fatalf("common.crypt = %q", cfg.Common.CryptName())
+	if cfg.Common.CryptName() != DefaultCryptName || DefaultCryptName != "aes-256-gcm" {
+		t.Fatalf("common.crypt = %q（默认应为 %q）", cfg.Common.CryptName(), DefaultCryptName)
 	}
 	if cfg.Common.AEADName() != protocol.AEADChaCha20Poly1305 {
 		t.Fatalf("common.aead = %q", cfg.Common.AEADName())
@@ -299,7 +299,7 @@ func TestCommonValidateErrors(t *testing.T) {
 		{"psk 全 0 占位", func(s string) string {
 			return strings.Replace(s, `psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="`, `psk: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="`, 1)
 		}, "common.psk"},
-		{"crypt 未知", func(s string) string { return strings.Replace(s, `crypt: "none"`, `crypt: "rot13"`, 1) }, "common.crypt"},
+		{"crypt 未知", func(s string) string { return strings.Replace(s, `crypt: "aes-256-gcm"`, `crypt: "rot13"`, 1) }, "common.crypt"},
 		{"aead 未知", func(s string) string {
 			return strings.Replace(s, `aead: "chacha20-poly1305"`, `aead: "rot13"`, 1)
 		}, "common.aead"},
@@ -504,8 +504,8 @@ func TestValidCrypt(t *testing.T) {
 
 func TestNormalizeDefaults(t *testing.T) {
 	var c Common
-	if c.CryptName() != "none" {
-		t.Fatalf("空 crypt 应规范化为 none，实际 %q", c.CryptName())
+	if c.CryptName() != DefaultCryptName {
+		t.Fatalf("空 crypt 应规范化为 %q，实际 %q", DefaultCryptName, c.CryptName())
 	}
 	if c.AEADName() != protocol.AEADChaCha20Poly1305 {
 		t.Fatalf("空 aead 应规范化，实际 %q", c.AEADName())
@@ -513,6 +513,28 @@ func TestNormalizeDefaults(t *testing.T) {
 	var l Log
 	if l.LevelOrDefault() != "info" {
 		t.Fatal("空 log level 应默认为 info")
+	}
+}
+
+// TestInsecureCryptWarning 固化「默认值不告警、弱算法必须告警」这条策略：
+// 默认值一旦被改回 none 或 CFB 系列，这里会立刻失败。
+func TestInsecureCryptWarning(t *testing.T) {
+	if DefaultCryptName != "aes-256-gcm" {
+		t.Fatalf("默认 crypt 应为 aes-256-gcm，实际 %q", DefaultCryptName)
+	}
+	for _, name := range []string{"", "aes-256-gcm", "aes-128-gcm"} {
+		if got := InsecureCryptWarning(name); got != "" {
+			t.Fatalf("%q 不应告警，实际 %q", name, got)
+		}
+	}
+	for _, name := range []string{"none", "aes-128", "aes-256", "salsa20"} {
+		if got := InsecureCryptWarning(name); got == "" {
+			t.Fatalf("%q 应当告警", name)
+		}
+	}
+	// 空值走默认值，与显式写默认值等价：都不告警。
+	if InsecureCryptWarning("") != InsecureCryptWarning(DefaultCryptName) {
+		t.Fatal("空 crypt 应与默认值同口径")
 	}
 }
 

@@ -60,6 +60,11 @@ func run() error {
 	}
 	defer func() { _ = logCloser.Close() }()
 
+	// 传输层加密若被显式关掉、或换成了不提供完整性的 CFB 系列，启动时提示一次。
+	if warn := config.InsecureCryptWarning(cfg.Common.CryptName()); warn != "" {
+		logger.Warn(warn, log.Event, "insecure_crypt", "crypt", cfg.Common.CryptName())
+	}
+
 	psk, err := cfg.Common.PSKBytes()
 	if err != nil {
 		return err

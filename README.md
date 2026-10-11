@@ -15,7 +15,8 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
   **认证失败不回帧**（失败原因只进服务端本地日志），伪造 `AUTH_REQ` 因此既探不到错误码、
   也拿不到「时间窗 vs token」构成的 oracle；握手态的帧体上限固定为 1KB（`AUTH_REQ` 帧体恒为 63B），
   避免未认证的长度放大。
-- 加密：`AUTH` 完成后所有帧走 AEAD（默认 ChaCha20-Poly1305），帧类型与 StreamID 不外露；可选再叠加传输层加密隐藏 KCP 头。
+- 加密：`AUTH` 完成后所有帧走 AEAD（默认 ChaCha20-Poly1305），帧类型与 StreamID 不外露；
+  传输层默认再叠加 `aes-256-gcm`（`common.crypt`），连 KCP 头与帧的明文头一起隐藏。
 - 连接池：保底 `pool.size` 条已认证会话，空闲复用、上限排队、空闲回收、失效摘除、指数退避重建。
 - 流语义：半关闭（FIN）、RST、未知 StreamID 丢弃、会话关闭广播 RST。
 - 错误码：服务端拨号失败按 SOCKS5 REP 码回传（`5` 拒绝 / `4` 主机不可达 / `3` 网络不可达 / `6` 超时 / `1` 其他）。
@@ -70,6 +71,9 @@ sed -i.bak "s|^  psk: .*|  psk: \"$PSK\"|" gks.yaml && rm -f gks.yaml.bak
 ```
 
 服务端只监听 **UDP**，记得放行该端口。默认本地代理地址是 `127.0.0.1:2080`。
+
+示例配置里 `common.crypt` 是 `aes-256-gcm`，即**传输层默认开启加密**（两端读同一份配置，
+天然一致）。升级已有部署时注意：`crypt` 两端必须相同，只改一端会直接连不上，需要两端同时重启。
 
 两端各起一个**本地统计端点**（示例配置里客户端 `127.0.0.1:12081`、服务端 `127.0.0.1:12082`；
 同机联调必须错开，两机部署可以都用 `12081`）：
@@ -182,7 +186,12 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
   打开失败即启动失败。
 - `common.psk`：base64 编码的 32 字节，且不能是全 0 占位值。
 - `common.aead`：`chacha20-poly1305`（默认）或 `aes-256-gcm`。
-- `common.crypt`：`none`（默认）或 `aes-128-gcm` / `aes-256-gcm` / `aes-128` / `aes-256` / `salsa20`；开启后连 KCP 头也被加密（隐藏协议指纹），代价是每包多 28B 与一点 CPU。
+- `common.crypt`：**默认 `aes-256-gcm`**（传输层加密，连 KCP 头也一起加密、隐藏协议指纹）；
+  可选 `aes-128-gcm` / `none` / `aes-128` / `aes-256` / `salsa20`，代价是每包多 28B 与一点 CPU。
+  **只建议用两个 GCM 值**：`none` 时协议可被识别、且在路径上的攻击者能注入伪造段直接打断会话；
+  `aes-128` / `aes-256` / `salsa20` 走 kcp-go 的 CFB + CRC32 遗留路径，CRC32 是校验和不是 MAC、
+  只有机密性没有完整性。这三种会在启动时打一条 `insecure_crypt` 告警。
+  **两端必须一致**：只升级一端会直接连不上（fail closed）。从旧版本升级时，两端要一起改。
 - `client.auth.mode`：当前只支持 `none`。
 - `common.heartbeat`：客户端按 `interval`（±25% 抖动）发 PING，连续 `miss` 次没收到 PONG 就判死并重建；
   服务端**不发心跳**，只用 `interval` 推导「对端沉默多久算死」（`5×interval`，默认 100s）——客户端进程被杀、
