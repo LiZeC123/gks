@@ -220,6 +220,10 @@ type Session struct {
 	drainMu   sync.Mutex
 	drainDone chan struct{}
 
+	// started 表示会话已经进入安全态（start 已执行、已计入 SessionsActive）。
+	// 握手失败的会话从未计数，关闭时不能去减（否则活跃会话数会变成负数）。
+	started atomic.Bool
+
 	wg sync.WaitGroup
 
 	pingsSent  atomic.Uint64
@@ -445,6 +449,8 @@ func (s *Session) start() {
 	)
 	s.opts.Metrics.SessionsActive.Add(1)
 	s.opts.Metrics.SessionsTotal.Add(1)
+	// 先标记已计数，再启动 goroutine：否则读循环立刻失败时可能在计数完成前就走到 shutdown。
+	s.started.Store(true)
 	// 被动判活的计时从会话进入安全态开始。
 	s.t0 = time.Now()
 	s.wg.Add(2)
@@ -875,7 +881,10 @@ func (s *Session) shutdown(err error, drainConn bool) {
 		} else {
 			_ = s.conn.Close()
 		}
-		s.opts.Metrics.SessionsActive.Add(-1)
+		// 只有进入过安全态的会话才被计入过，握手失败的不减（见 started 的注释）。
+		if s.started.Load() {
+			s.opts.Metrics.SessionsActive.Add(-1)
+		}
 		// 会话关闭等于向所有流广播 RST（dev.md §3.8）。
 		s.resetAllStreams(ErrSessionClosed)
 		s.log.Info("会话关闭",

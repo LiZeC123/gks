@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/protocol"
 	"github.com/LiZeC123/gks/internal/transport"
 )
@@ -508,5 +509,35 @@ func TestSendControlAfterClose(t *testing.T) {
 	}
 	if s.Role() != RoleClient {
 		t.Fatalf("角色 = %v", s.Role())
+	}
+}
+
+// TestFailedHandshakeDoesNotCountSession 回归：握手失败的会话从未计入活跃数，
+// 因此关闭它不能去减 SessionsActive（否则活跃会话数会变成负数，面板上会看到 -1）。
+func TestFailedHandshakeDoesNotCountSession(t *testing.T) {
+	reg := &metrics.Registry{}
+	cliConn, srvConn := net.Pipe()
+	go func() {
+		// 谎报一个超长帧体：服务端在握手阶段解析帧头时就会失败。
+		_, _ = cliConn.Write([]byte{0xff, 0xff, 0xff, 0xff, 0x01})
+		time.Sleep(50 * time.Millisecond)
+		_ = cliConn.Close()
+	}()
+
+	opts := serverOptions(newReplayCache(t), testPSK, 0)
+	opts.Metrics = reg
+	opts.AuthTimeout = 500 * time.Millisecond
+	if _, err := AcceptSession(context.Background(), srvConn, opts); err == nil {
+		t.Fatal("非法帧应导致握手失败")
+	}
+
+	if got := reg.SessionsActive.Load(); got != 0 {
+		t.Fatalf("握手失败后活跃会话数 = %d，期望 0（不能减成负数）", got)
+	}
+	if got := reg.SessionsTotal.Load(); got != 0 {
+		t.Fatalf("握手失败不应计入累计会话数，实际 %d", got)
+	}
+	if got := reg.AuthFailures.Load(); got != 1 {
+		t.Fatalf("认证失败计数 = %d，期望 1", got)
 	}
 }
