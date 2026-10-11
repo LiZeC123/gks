@@ -216,6 +216,10 @@ type Session struct {
 	t0       time.Time
 	lastRecv atomic.Int64
 
+	// drainDone 在优雅关闭时创建，底层连接真正释放后关闭（见 WaitDrained）。
+	drainMu   sync.Mutex
+	drainDone chan struct{}
+
 	wg sync.WaitGroup
 
 	pingsSent  atomic.Uint64
@@ -813,6 +817,35 @@ func (s *Session) CloseWithGoAway(ctx context.Context) error {
 	return err
 }
 
+// CloseWithGoAwayAndDrain 与 CloseWithGoAway 相同，并等到底层连接真正释放后才返回。
+//
+// 供进程退出流程使用：kcp-go 的写出是异步的（见 gracefulDrainer），而监听 socket 被所有会话
+// 共用——关闭监听之前必须确认最后一批 GOAWAY 已经真正发出去，否则它们会被一起丢掉。
+// 客户端热路径不要用它（会引入一个排空窗口的延迟）。
+func (s *Session) CloseWithGoAwayAndDrain(ctx context.Context) error {
+	err := s.CloseWithGoAway(ctx)
+	if waitErr := s.WaitDrained(ctx); waitErr != nil {
+		return waitErr
+	}
+	return err
+}
+
+// WaitDrained 等待底层连接真正释放；若该会话没有走优雅关闭（无排空可等）则立即返回。
+func (s *Session) WaitDrained(ctx context.Context) error {
+	s.drainMu.Lock()
+	done := s.drainDone
+	s.drainMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // closeWith 幂等地关闭会话并记录原因。
 func (s *Session) closeWith(err error) {
 	s.shutdown(err, false)
@@ -832,7 +865,11 @@ func (s *Session) shutdown(err error, drainConn bool) {
 		s.errMu.Unlock()
 		close(s.closed)
 		if drainConn {
-			s.closeConnAfterDrain()
+			done := make(chan struct{})
+			s.drainMu.Lock()
+			s.drainDone = done
+			s.drainMu.Unlock()
+			go s.closeConnAfterDrain(done)
 		} else {
 			_ = s.conn.Close()
 		}
@@ -867,17 +904,18 @@ type gracefulDrainer interface {
 // 充裕；而释放是异步的（见 closeConnAfterDrain），真正代价只是 socket 多存活 100ms。
 const goAwayDrainDelay = 100 * time.Millisecond
 
-// closeConnAfterDrain 延后释放底层连接。
+// closeConnAfterDrain 延后释放底层连接，并在真正释放后关闭 done。
 //
-// 不能阻塞当前调用方（池回收、连接收尾都在热路径上），因此放到独立 goroutine：会话已经关闭，
-// 表项、流与指标都已回收，这里只是让 socket 多活一小会儿。
-func (s *Session) closeConnAfterDrain() {
+// 不能阻塞当前调用方（池回收、连接收尾都在热路径上），因此由 shutdown 放到独立 goroutine：
+// 会话已经关闭，表项、流与指标都已回收，这里只是让 socket 多活一小会儿。
+func (s *Session) closeConnAfterDrain(done chan struct{}) {
+	defer close(done)
 	dc, ok := s.conn.(gracefulDrainer)
 	if !ok {
 		_ = s.conn.Close()
 		return
 	}
-	go func() { _ = dc.CloseAfterDrain(goAwayDrainDelay) }()
+	_ = dc.CloseAfterDrain(goAwayDrainDelay)
 }
 
 // Done 在会话关闭后关闭。

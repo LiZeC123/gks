@@ -149,19 +149,31 @@ func run() error {
 	pending := make(chan struct{}, cfg.Server.Auth.MaxPendingSessions)
 
 	var wg sync.WaitGroup
-	go func() {
-		<-ctx.Done()
-		logger.Info("收到退出信号，停止接受新会话", log.Event, "shutdown")
-		_ = tln.Close()
-	}()
+
+	// acceptPollInterval 是 accept 循环的轮询间隔。
+	//
+	// 为什么要轮询而不是「退出时关监听」：kcp-go 的 Listener 只有一个共享 UDP socket，Close 会
+	// 把它关掉、使所有活跃会话立刻读失败，尚未发出的 GOAWAY 全部丢失（dev.md §15 第 22 条）；
+	// 而 AcceptKCP 只在进入时读取监听读期限，已经阻塞的 Accept 不会被随后的 SetReadDeadline
+	// 唤醒。轮询因此给「收到退出信号 → 停止接受新会话」一个固定上限（≤ 本间隔），同时保持
+	// socket 打开，让在途会话把 GOAWAY 发出去。
+	const acceptPollInterval = 200 * time.Millisecond
 
 	for {
+		deadline := time.Now().Add(acceptPollInterval)
+		_ = tln.SetReadDeadline(deadline)
 		conn, err := tln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
+				logger.Info("收到退出信号，停止接受新会话", log.Event, "shutdown")
 				break
 			}
-			logger.Warn("接受会话失败", log.Event, "accept_error", "err", err)
+			// 只有「早于期限」的错误才是真错误；轮询超时是正常路径。这里比较时间而不是判断
+			// 错误类型：kcp-go 各版本对超时的表示不同（v5.4.20 是普通 error，v5.6.72 才实现 net.Error）。
+			if time.Now().Before(deadline) {
+				logger.Warn("接受会话失败", log.Event, "accept_error", "err", err)
+				time.Sleep(50 * time.Millisecond) // 持续性错误不要变成忙等
+			}
 			continue
 		}
 		select {

@@ -90,13 +90,10 @@ func (c *gatedConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-// TestCloseWithGoAwayBoundedByContext 验证：GOAWAY 写不出去时，CloseWithGoAway 在 ctx 上限
-// 返回，且无论写出成败会话都必须已经关闭（不能把会话留着）。
-func TestCloseWithGoAwayBoundedByContext(t *testing.T) {
+// newClientWrappedPair 建立一对已认证会话，客户端连接先经过 wrap 包装（用于注入行为）。
+func newClientWrappedPair(t *testing.T, wrap func(net.Conn) net.Conn) (*Session, *Session) {
+	t.Helper()
 	cliPipe, srvPipe := net.Pipe()
-	gated := &gatedConn{Conn: cliPipe, gate: make(chan struct{})}
-	defer close(gated.gate) // 放行被挂住的写循环
-
 	srvCh := make(chan *Session, 1)
 	go func() {
 		s, err := AcceptSession(context.Background(), srvPipe, serverOptions(newReplayCache(t), testPSK, 0))
@@ -105,14 +102,30 @@ func TestCloseWithGoAwayBoundedByContext(t *testing.T) {
 		}
 		srvCh <- s
 	}()
-	cli, err := DialSession(context.Background(), gated, clientOptions(testPSK, 0))
+	cli, err := DialSession(context.Background(), wrap(cliPipe), clientOptions(testPSK, 0))
 	if err != nil {
 		t.Fatalf("DialSession: %v", err)
 	}
 	srv := <-srvCh
-	defer func() { _ = srv.Close() }()
+	t.Cleanup(func() {
+		_ = cli.Close()
+		_ = srv.Close()
+	})
+	return cli, srv
+}
+
+// TestCloseWithGoAwayBoundedByContext 验证：GOAWAY 写不出去时，CloseWithGoAway 在 ctx 上限
+// 返回，且无论写出成败会话都必须已经关闭（不能把会话留着）。
+func TestCloseWithGoAwayBoundedByContext(t *testing.T) {
+	gated := &gatedConn{gate: make(chan struct{})}
+	defer close(gated.gate) // 放行被挂住的写循环
+	cli, _ := newClientWrappedPair(t, func(c net.Conn) net.Conn {
+		gated.Conn = c
+		return gated
+	})
 
 	gated.arm() // 此后所有写入都会挂住
+	err := error(nil)
 
 	const limit = 200 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
@@ -195,5 +208,62 @@ func TestCloseWithGoAwayOverKCP(t *testing.T) {
 	t.Logf("本端发送返回: %v；对端关闭原因: %v", sendErr, got)
 	if !errors.Is(got, ErrSessionClosed) {
 		t.Fatalf("真实 KCP 上对端关闭原因 = %v，期望 ErrSessionClosed（GOAWAY 未到达）", got)
+	}
+}
+
+// drainerConn 实现 gracefulDrainer：CloseAfterDrain 会被延迟，用于观察排空契约。
+type drainerConn struct {
+	net.Conn
+	delay  time.Duration
+	mu     sync.Mutex
+	calls  int
+	closed chan struct{}
+}
+
+func (c *drainerConn) CloseAfterDrain(d time.Duration) error {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	close(c.closed)
+	return c.Conn.Close()
+}
+
+// TestGracefulDrainContract 固定优雅关闭的排空契约：
+// 会话逻辑关闭立即返回（不阻塞热路径），WaitDrained 等到传输层真正释放连接后才返回。
+func TestGracefulDrainContract(t *testing.T) {
+	const drain = 150 * time.Millisecond
+	dc := &drainerConn{delay: drain, closed: make(chan struct{})}
+	cli, _ := newClientWrappedPair(t, func(c net.Conn) net.Conn {
+		dc.Conn = c
+		return dc
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	cli.closeWithGracefulConn(ErrSessionClosed)
+	if blocked := time.Since(start); blocked > drain/2 {
+		t.Fatalf("优雅关闭阻塞了调用方：%s（排空应当异步）", blocked)
+	}
+	if err := cli.WaitDrained(ctx); err != nil {
+		t.Fatalf("WaitDrained: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < drain {
+		t.Fatalf("WaitDrained 早于排空完成就返回：%s < %s", elapsed, drain)
+	}
+	dc.mu.Lock()
+	calls := dc.calls
+	dc.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("CloseAfterDrain 调用次数 = %d，期望 1", calls)
+	}
+	select {
+	case <-dc.closed:
+	default:
+		t.Fatal("排空结束后底层连接应已关闭")
 	}
 }

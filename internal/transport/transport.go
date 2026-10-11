@@ -139,6 +139,14 @@ func (l *Listener) Accept() (net.Conn, error) {
 // Addr 返回实际监听地址（端口为 0 时可用于取回随机端口）。
 func (l *Listener) Addr() net.Addr { return l.l.Addr() }
 
+// SetReadDeadline 设置 Accept 的等待上限。
+//
+// 用途：优雅退出时先「不再接受新会话」，但要保持监听 socket 打开——kcp-go 的 Listener 只有
+// 一个共享的 UDP socket，Close 会把它关掉，使所有活跃会话立刻读失败，尚未发出的 GOAWAY 全部
+// 丢失（dev.md §15 第 22 条）。因此退出时应当先 SetReadDeadline(time.Now()) 让 Accept 立刻
+// 返回，等会话排空后再 Close。
+func (l *Listener) SetReadDeadline(t time.Time) error { return l.l.SetReadDeadline(t) }
+
 // Close 关闭监听器。
 func (l *Listener) Close() error { return l.l.Close() }
 

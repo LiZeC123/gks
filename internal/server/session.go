@@ -15,11 +15,8 @@ import (
 	"github.com/LiZeC123/gks/internal/protocol"
 )
 
-// goAwayFlushDelay 是发送 GOAWAY 后留给写循环的冲刷时间。
-//
-// 阶段 2/3 的简化实现：真正的「等待活跃流排空」需要先解决 kcp-go
-// `Listener.Close()` 关闭共享 UDP socket 的问题（dev.md §15 第 22 条）。
-const goAwayFlushDelay = 200 * time.Millisecond
+// goAwaySendTimeout 是退出时等待 GOAWAY 写好（含传输层排空）的上限。
+const goAwaySendTimeout = 3 * time.Second
 
 // HandlerConfig 是 Handler 的运行参数（由 cmd 从配置装配）。
 type HandlerConfig struct {
@@ -85,10 +82,12 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	select {
 	case <-sess.Done():
 	case <-ctx.Done():
-		sendCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = sess.SendControl(sendCtx, protocol.TypeGoAway, nil)
+		// 收到退出信号：告别并等它真正写出去再关闭会话（客户端会立刻回收，而不是等沉默判死）。
+		// 注意监听 socket 是所有会话共用的，因此这里必须等到连接真正释放；关闭监听由
+		// cmd/server 在等待所有会话结束后进行。
+		sendCtx, cancel := context.WithTimeout(context.Background(), goAwaySendTimeout)
+		_ = sess.CloseWithGoAwayAndDrain(sendCtx)
 		cancel()
-		time.Sleep(goAwayFlushDelay)
 	}
 
 	st := sess.Stats()
