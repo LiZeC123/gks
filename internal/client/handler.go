@@ -49,7 +49,10 @@ func (s *dialSessionSource) Acquire(ctx context.Context) (*mux.Session, error) {
 	return sess, nil
 }
 
-func (s *dialSessionSource) Release(sess *mux.Session) { _ = sess.Close() }
+// Release 是「不复用、优雅结束」语义：会话仍然健康，离开前先向对端告别。
+func (s *dialSessionSource) Release(sess *mux.Session) { closeGracefully(sess) }
+
+// Discard 是「会话已不可用」语义：静默关闭，不必等 GOAWAY 写出。
 func (s *dialSessionSource) Discard(sess *mux.Session) { _ = sess.Close() }
 
 // HandlerConfig 是 Handler 的运行参数（由 cmd 从配置装配）。
@@ -272,7 +275,7 @@ func (h *Handler) isSessionDead(sess *mux.Session, err error) bool {
 		errors.Is(err, net.ErrClosed)
 }
 
-// releaseSession 归还会话：池化时交给池复用，否则关闭并清理路由表。
+// releaseSession 归还会话：池化时交给池复用，否则告别后关闭并清理路由表。
 func (h *Handler) releaseSession(sess *mux.Session) {
 	if sess == nil {
 		return
@@ -282,7 +285,7 @@ func (h *Handler) releaseSession(sess *mux.Session) {
 		return
 	}
 	h.forgetSession(sess)
-	_ = sess.Close()
+	closeGracefully(sess)
 }
 
 // discardSession 丢弃不可用的会话。

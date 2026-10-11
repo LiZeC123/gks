@@ -86,6 +86,24 @@ func applyTuning(s *kcp.UDPSession, o Options) error {
 	return nil
 }
 
+// conn 包装 kcp 会话，补上 kcp-go 不提供的「优雅关闭」语义。
+type conn struct {
+	*kcp.UDPSession
+}
+
+// CloseAfterDrain 先给 kcp-go 的后处理 goroutine 一点时间把已写出的数据报发到网络上，再关闭。
+//
+// 背景：kcp-go 的 Write 只把数据交给 per-session 的 postProcess goroutine（FEC → 加密 → 批量
+// 发送），而 Close 会直接关掉底层 UDP socket，因此「Write 返回」不等于「数据已在网络上」。
+// 实测（loopback）：应用层写完 GOAWAY 后立刻 Close，对端读不到该帧；等待 100ms 再 Close，
+// 连续多次都能读到。mux 通过 gracefulDrainer 接口在优雅关闭时调用本方法。
+func (c *conn) CloseAfterDrain(d time.Duration) error {
+	if d > 0 {
+		time.Sleep(d)
+	}
+	return c.UDPSession.Close()
+}
+
 // Listener 是 Server 侧的 KCP 监听器。
 type Listener struct {
 	l    *kcp.Listener
@@ -115,7 +133,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 		_ = sess.Close()
 		return nil, err
 	}
-	return sess, nil
+	return &conn{UDPSession: sess}, nil
 }
 
 // Addr 返回实际监听地址（端口为 0 时可用于取回随机端口）。
@@ -146,5 +164,5 @@ func (d *Dialer) Dial(addr string) (net.Conn, error) {
 		_ = sess.Close()
 		return nil, err
 	}
-	return sess, nil
+	return &conn{UDPSession: sess}, nil
 }

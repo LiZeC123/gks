@@ -242,10 +242,16 @@ func (p *SessionPool) Release(sess *mux.Session) {
 	}
 	p.mu.Lock()
 	e, ok := p.entries[sess]
+	// 仍然健康的会话被放弃属于「优雅放弃」，要向对端告别；已失效或不在池中的会话静默关闭。
+	graceful := ok && !p.isDead(sess)
 	if !ok || p.closed || p.isDead(sess) || sess.NumStreams() != 0 {
 		delete(p.entries, sess)
 		p.mu.Unlock()
-		_ = sess.Close()
+		if graceful {
+			closeGracefully(sess)
+		} else {
+			_ = sess.Close()
+		}
 		p.notifyDrop(sess)
 		p.signal()
 		return
@@ -257,6 +263,9 @@ func (p *SessionPool) Release(sess *mux.Session) {
 }
 
 // Discard 丢弃一条不可用的会话（例如开流失败、等待回包期间失效）。
+//
+// 静默关闭：调用它的路径基本都是「会话已经不好用」，等待 GOAWAY 写出只会给错误路径加延迟；
+// 对端会由沉默判死回收（阈值 = 5×common.heartbeat.interval）。
 func (p *SessionPool) Discard(sess *mux.Session) {
 	if sess == nil {
 		return
@@ -283,8 +292,8 @@ func (p *SessionPool) Close() {
 		p.mu.Unlock()
 
 		close(p.done)
+		closeGracefullyBatch(sessions)
 		for _, s := range sessions {
-			_ = s.Close()
 			p.notifyDrop(s)
 		}
 		p.wg.Wait()
@@ -445,8 +454,8 @@ func (p *SessionPool) reclaimIdle() {
 	}
 	p.mu.Unlock()
 
+	closeGracefullyBatch(toClose)
 	for _, s := range toClose {
-		_ = s.Close()
 		p.notifyDrop(s)
 		p.log.Info("回收空闲会话",
 			log.Event, "pool_session_reclaim",
@@ -456,6 +465,44 @@ func (p *SessionPool) reclaimIdle() {
 	if len(toClose) > 0 {
 		p.signal()
 	}
+}
+
+// goAwayTimeout 是客户端主动放弃会话时，等待 GOAWAY 写出的上限。
+//
+// 健康路径上写出在微秒级完成，只有对端不可达时才会等满；因此取值要小。
+const goAwayTimeout = time.Second
+
+// closeGracefully 先发 GOAWAY 再关闭一条仍然健康的会话。
+//
+// 为什么不能直接 Close：对端只有收到 GOAWAY 才知道本端已放弃该会话，否则要等沉默判死
+// （5×心跳间隔，默认 100s）才回收它——那期间对端的会话、goroutine 与其上的流都不会释放。
+func closeGracefully(sess *mux.Session) {
+	if sess == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), goAwayTimeout)
+	defer cancel()
+	_ = sess.CloseWithGoAway(ctx)
+}
+
+// closeGracefullyBatch 并发地对一批会话告别，共用一个总预算。
+//
+// 顺序告别会让最坏耗时变成「会话数 × goAwayTimeout」（池关闭时可能几十条），因此并发 + 共享 deadline。
+func closeGracefullyBatch(sessions []*mux.Session) {
+	if len(sessions) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), goAwayTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, sess := range sessions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sess.CloseWithGoAway(ctx)
+		}()
+	}
+	wg.Wait()
 }
 
 // ensureMin 把健康会话数补到 Size；stagger 为 true 时按 StartupJitter 错峰。

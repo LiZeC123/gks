@@ -187,7 +187,7 @@ type Session struct {
 	writeCipher protocol.Cipher
 	writeNonce  *protocol.NonceCounter
 
-	sendCh    chan protocol.Frame
+	sendCh    chan outFrame
 	closed    chan struct{}
 	closeOnce sync.Once
 	errMu     sync.Mutex
@@ -222,7 +222,7 @@ func newSession(conn net.Conn, opts Options) (*Session, error) {
 		role:         opts.Role,
 		opts:         opts,
 		conv:         conv,
-		sendCh:       make(chan protocol.Frame, opts.WriteQueue),
+		sendCh:       make(chan outFrame, opts.WriteQueue),
 		closed:       make(chan struct{}),
 		streams:      make(map[uint32]*stream),
 		nextStreamID: 1,
@@ -508,22 +508,52 @@ func (s *Session) dispatch(f protocol.Frame) {
 // writeLoop 是唯一的写 goroutine（单写原则，dev.md §11.1）。
 func (s *Session) writeLoop() {
 	defer s.wg.Done()
+	// 退出时唤醒仍在等待写出结果的调用方（sendSync），否则它们只能等 ctx 超时。
+	defer s.failPending()
 	for {
 		select {
 		case <-s.closed:
 			return
-		case f := <-s.sendCh:
-			raw, err := protocol.MarshalSecure(s.writeCipher, s.writeNonce, f)
+		case of := <-s.sendCh:
+			raw, err := protocol.MarshalSecure(s.writeCipher, s.writeNonce, of.f)
 			if err != nil {
-				s.closeWith(fmt.Errorf("mux: 编码帧失败: %w", err))
+				err = fmt.Errorf("mux: 编码帧失败: %w", err)
+				signalDone(of.done, err)
+				s.closeWith(err)
 				return
 			}
 			if _, err := s.conn.Write(raw); err != nil {
-				s.closeWith(fmt.Errorf("mux: 写入帧失败: %w", err))
+				err = fmt.Errorf("mux: 写入帧失败: %w", err)
+				signalDone(of.done, err)
+				s.closeWith(err)
 				return
 			}
 			s.framesOut.Add(1)
+			signalDone(of.done, nil)
 		}
+	}
+}
+
+// failPending 把队列里剩余出站单元的等待者全部唤醒并报告会话已关闭。
+func (s *Session) failPending() {
+	for {
+		select {
+		case of := <-s.sendCh:
+			signalDone(of.done, s.closeErr())
+		default:
+			return
+		}
+	}
+}
+
+// signalDone 非阻塞地投递写出结果；done 为 nil 表示调用方不等待（普通发送路径）。
+func signalDone(done chan error, err error) {
+	if done == nil {
+		return
+	}
+	select {
+	case done <- err:
+	default:
 	}
 }
 
@@ -616,15 +646,52 @@ func (s *Session) SendControl(ctx context.Context, t protocol.Type, payload []by
 	return s.send(ctx, protocol.Frame{Type: t, StreamID: 0, Payload: payload})
 }
 
+// outFrame 是一个待写出的帧。done 非 nil 时，writeLoop 写出后会投递结果（缓冲 1，不会泄漏）。
+type outFrame struct {
+	f    protocol.Frame
+	done chan error
+}
+
 // send 把帧放入发送队列；队列满时按背压语义阻塞到 ctx 结束或会话关闭。
 func (s *Session) send(ctx context.Context, f protocol.Frame) error {
-	if len(f.Payload) > protocol.MaxFrameBody {
-		return fmt.Errorf("%w: %d > %d", ErrPayloadTooLarge, len(f.Payload), protocol.MaxFrameBody)
+	return s.enqueue(ctx, outFrame{f: f})
+}
+
+// sendSync 入队并等待该帧真正写出（或失败/会话关闭/ctx 结束）。
+//
+// 用于「必须确认已离开本机」的帧（当前只有 GOAWAY）。注意：
+//   - 返回 nil 只表示这一帧已交给底层 conn.Write，不表示对端已收到（协议没有 ACK）；
+//   - 绝不能在 writeLoop 内部调用，否则会自等自死锁。
+func (s *Session) sendSync(ctx context.Context, f protocol.Frame) error {
+	done := make(chan error, 1)
+	if err := s.enqueue(ctx, outFrame{f: f, done: done}); err != nil {
+		return err
+	}
+	// 先看结果是否已经就绪：写完与会话关闭可能同时发生，避免误报为失败。
+	select {
+	case err := <-done:
+		return err
+	default:
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-s.closed:
+		return s.closeErr()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// enqueue 把出站单元放入发送队列；队列满时按背压语义阻塞到 ctx 结束或会话关闭。
+func (s *Session) enqueue(ctx context.Context, of outFrame) error {
+	if len(of.f.Payload) > protocol.MaxFrameBody {
+		return fmt.Errorf("%w: %d > %d", ErrPayloadTooLarge, len(of.f.Payload), protocol.MaxFrameBody)
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	f.Payload = append([]byte(nil), f.Payload...)
+	of.f.Payload = append([]byte(nil), of.f.Payload...)
 	// 先做一次关闭预检：否则当 closed 与 sendCh 同时可写时，select 会随机命中后者，
 	// 使「会话关闭后发送」偶发成功。
 	select {
@@ -635,7 +702,7 @@ func (s *Session) send(ctx context.Context, f protocol.Frame) error {
 	select {
 	case <-s.closed:
 		return s.closeErr()
-	case s.sendCh <- f:
+	case s.sendCh <- of:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -652,20 +719,56 @@ func (s *Session) Handle(t protocol.Type, h Handler) {
 	s.handlers[t] = h
 }
 
-// Close 主动关闭会话。
+// Close 主动关闭会话（不通知对端）。
+//
+// 适用于「对端已经不可用」的路径（读写出错、会话失效、丢弃坏会话）；优雅放弃一条仍然
+// 健康的会话请用 CloseWithGoAway，否则对端只能靠沉默判死才回收它。
 func (s *Session) Close() error {
 	s.closeWith(ErrSessionClosed)
 	return nil
 }
 
+// CloseWithGoAway 先发 GOAWAY 并等待它写出，再关闭会话。
+//
+// 用于主动且优雅地放弃一条会话（客户端池回收空闲会话、服务端退出等）：对端收到 GOAWAY 后
+// 立刻回收该会话及其上的流，不必等到沉默判死。ctx 是等待写出的上限——对端不可达时会等到
+// ctx 结束，但关闭一定会发生（本函数不会因为写出失败而把会话留着）。
+//
+// 为什么需要「等待写出」：帧只是入队，closeWith 会立刻关闭底层 conn，writeLoop 的 select
+// 在 closed 与 sendCh 同时就绪时随机选择，直接 Close 会让 GOAWAY 静默丢失。
+//
+// 返回值只表示本帧的写出结果：返回 nil 即已交给底层；返回非 nil 时无法区分「没写出去」与
+// 「写出去之后对端立刻关闭了连接（本端读循环同时记录了 socket 错误）」——对端收到 GOAWAY
+// 就会立刻关闭，这是正常行为，调用方不应据此判定失败。
+func (s *Session) CloseWithGoAway(ctx context.Context) error {
+	err := s.sendSync(ctx, protocol.Frame{Type: protocol.TypeGoAway})
+	s.closeWithGracefulConn(ErrSessionClosed)
+	return err
+}
+
 // closeWith 幂等地关闭会话并记录原因。
 func (s *Session) closeWith(err error) {
+	s.shutdown(err, false)
+}
+
+// closeWithGracefulConn 与 closeWith 相同，但底层连接晚一点释放：给传输层把「已写出但尚未
+// 真正发到网络」的数据送出去的机会（见 gracefulDrainer）。会话本身立即对所有调用方可见为已关闭。
+func (s *Session) closeWithGracefulConn(err error) {
+	s.shutdown(err, true)
+}
+
+// shutdown 幂等地关闭会话并记录原因；drainConn 决定底层连接是立即关闭还是延后释放。
+func (s *Session) shutdown(err error, drainConn bool) {
 	s.closeOnce.Do(func() {
 		s.errMu.Lock()
 		s.err = err
 		s.errMu.Unlock()
 		close(s.closed)
-		_ = s.conn.Close()
+		if drainConn {
+			s.closeConnAfterDrain()
+		} else {
+			_ = s.conn.Close()
+		}
 		s.opts.Metrics.SessionsActive.Add(-1)
 		// 会话关闭等于向所有流广播 RST（dev.md §3.8）。
 		s.resetAllStreams(ErrSessionClosed)
@@ -678,6 +781,36 @@ func (s *Session) closeWith(err error) {
 			"pongs_recv", s.pongsRecv.Load(),
 		)
 	})
+}
+
+// gracefulDrainer 由传输层可选实现：关闭底层连接前，先给「已交给传输层但尚未真正发出」的数据
+// 一点时间落到网络上。接口定义在消费方（mux），因此 mux 不依赖具体传输实现。
+//
+// 为什么需要它：kcp-go 的 UDPSession.Write 只是把数据交给它的 per-session 后处理 goroutine
+// （FEC → 加密 → 批量发送），紧接着 Close 会关闭底层 UDP socket，未发出的数据报被直接丢弃——
+// GOAWAY 就是典型受害者。实测：写出后立刻 Close，对端读不到该帧；等待 100ms 后连续 5 次都读到。
+type gracefulDrainer interface {
+	// CloseAfterDrain 最多等待 d，然后关闭底层连接。
+	CloseAfterDrain(d time.Duration) error
+}
+
+// goAwayDrainDelay 是优雅关闭时留给传输层发送的宽限时间。
+//
+// 依据：kcp-go 的后处理 goroutine 收到数据即处理、没有固定定时器，100ms 对「发出一个小包」极其
+// 充裕；而释放是异步的（见 closeConnAfterDrain），真正代价只是 socket 多存活 100ms。
+const goAwayDrainDelay = 100 * time.Millisecond
+
+// closeConnAfterDrain 延后释放底层连接。
+//
+// 不能阻塞当前调用方（池回收、连接收尾都在热路径上），因此放到独立 goroutine：会话已经关闭，
+// 表项、流与指标都已回收，这里只是让 socket 多活一小会儿。
+func (s *Session) closeConnAfterDrain() {
+	dc, ok := s.conn.(gracefulDrainer)
+	if !ok {
+		_ = s.conn.Close()
+		return
+	}
+	go func() { _ = dc.CloseAfterDrain(goAwayDrainDelay) }()
 }
 
 // Done 在会话关闭后关闭。
