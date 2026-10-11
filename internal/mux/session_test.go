@@ -93,10 +93,10 @@ func TestSessionHandshakeEchoAndHeartbeat(t *testing.T) {
 			errCh <- err
 			return
 		}
-		s.Handle(protocol.TypeTestEcho, func(s *Session, f protocol.Frame) {
+		s.Handle(protocol.TypeConnectResp, func(s *Session, f protocol.Frame) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			_ = s.SendControl(ctx, protocol.TypeTestEcho, f.Payload)
+			_ = s.SendControl(ctx, protocol.TypeConnectResp, f.Payload)
 		})
 		srvCh <- s
 	}()
@@ -122,12 +122,12 @@ func TestSessionHandshakeEchoAndHeartbeat(t *testing.T) {
 	}
 
 	echoCh := make(chan []byte, 1)
-	client.Handle(protocol.TypeTestEcho, func(s *Session, f protocol.Frame) {
+	client.Handle(protocol.TypeConnectResp, func(s *Session, f protocol.Frame) {
 		echoCh <- append([]byte(nil), f.Payload...)
 	})
 
 	payload := []byte("hello gks phase 2")
-	if err := client.SendControl(context.Background(), protocol.TypeTestEcho, payload); err != nil {
+	if err := client.SendControl(context.Background(), protocol.TypeConnectResp, payload); err != nil {
 		t.Fatalf("SendControl: %v", err)
 	}
 	select {
@@ -179,13 +179,19 @@ func TestSessionRejectsWrongPSK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	client, err := DialSession(context.Background(), conn, clientOptions(wrongPSK, 0))
+	// 反探测后服务端失败不回帧，客户端只能等到自己的握手超时；这里调短以免测试变慢。
+	cliOpts := clientOptions(wrongPSK, 0)
+	cliOpts.AuthTimeout = 500 * time.Millisecond
+	client, err := DialSession(context.Background(), conn, cliOpts)
 	if err == nil {
 		_ = client.Close()
 		t.Fatal("错误 PSK 不应握手成功")
 	}
-	if !errors.Is(err, protocol.ErrAuthFailed) {
-		t.Fatalf("客户端 err = %v，期望 ErrAuthFailed", err)
+	if errors.Is(err, protocol.ErrAuthFailed) {
+		t.Fatalf("客户端不应收到失败码（服务端不回帧），实际 err = %v", err)
+	}
+	if !errors.Is(err, ErrAuthRejected) {
+		t.Fatalf("客户端 err = %v，期望 ErrAuthRejected", err)
 	}
 
 	select {
@@ -198,6 +204,117 @@ func TestSessionRejectsWrongPSK(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("等待服务端结果超时")
+	}
+}
+
+// TestServerSilentOnAuthFailure 是反探测性质的回归测试：
+// 认证失败时服务端**一个字节都不回**，探测方因此无法用「伪造 AUTH_REQ → 读错误码」
+// 确认协议身份，也拿不到 token/时间窗/重放三档 oracle。
+func TestServerSilentOnAuthFailure(t *testing.T) {
+	ln := mustListen(t)
+	srvOpts := serverOptions(newReplayCache(t), testPSK, 0)
+
+	srvErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			srvErr <- err
+			return
+		}
+		_, err = AcceptSession(context.Background(), conn, srvOpts)
+		srvErr <- err
+	}()
+
+	conn, err := transport.NewDialer(testTransportOptions()).Dial(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// 用错误 PSK 构造一个**格式完全合法**的 AUTH_REQ：这正是攻击者能做出来的东西。
+	wrong, err := protocol.NewInitiator(protocol.HandshakeConfig{
+		PSK:  []byte("ffffffffffffffffffffffffffffffff"),
+		AEAD: protocol.AEADChaCha20Poly1305,
+	})
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	req, err := wrong.NewRequest()
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	raw, err := protocol.MarshalPlain(protocol.Frame{Type: protocol.TypeAuthReq, Payload: req.Marshal()})
+	if err != nil {
+		t.Fatalf("MarshalPlain: %v", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	if _, err := conn.Write(raw); err != nil {
+		t.Fatalf("写 AUTH_REQ: %v", err)
+	}
+
+	// 服务端应当直接关闭：无论读到 EOF（连接已释放）还是超时，都必须没有任何字节。
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err == nil {
+		t.Fatalf("服务端不应回帧，却读到 %d 字节: %x", n, buf[:n])
+	}
+	if n != 0 {
+		t.Fatalf("服务端不应回帧，却读到 %d 字节: %x", n, buf[:n])
+	}
+
+	select {
+	case err := <-srvErr:
+		if !errors.Is(err, protocol.ErrAuthFailed) {
+			t.Fatalf("服务端 err = %v，期望 ErrAuthFailed（失败原因只进本地日志）", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待服务端结果超时")
+	}
+}
+
+// TestHandshakeRejectsOversizedFrame 验证握手态的帧体上限被收紧到 MaxHandshakeBody：
+// 帧头里的 Length 在握手态是明文且未经认证，若沿用 MaxFrameBody，一个声明 64KB 的包头
+// 就能换来服务端 64KB 分配 + 阻塞到 auth_timeout 的未认证会话。
+func TestHandshakeRejectsOversizedFrame(t *testing.T) {
+	ln := mustListen(t)
+	srvOpts := serverOptions(newReplayCache(t), testPSK, 0)
+
+	srvErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			srvErr <- err
+			return
+		}
+		_, err = AcceptSession(context.Background(), conn, srvOpts)
+		srvErr <- err
+	}()
+
+	conn, err := transport.NewDialer(testTransportOptions()).Dial(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// 只发帧头：Length 声明为 MaxHandshakeBody+1，帧体一个字节都不发。
+	hdr := protocol.Header{Length: protocol.MaxHandshakeBody + 1}
+	hb := hdr.Marshal()
+	if _, err := conn.Write(hb[:]); err != nil {
+		t.Fatalf("写帧头: %v", err)
+	}
+
+	select {
+	case err := <-srvErr:
+		if !errors.Is(err, protocol.ErrFrameTooLarge) {
+			t.Fatalf("服务端 err = %v，期望 ErrFrameTooLarge", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("服务端应立即因长度超限断开，而不是等到 auth_timeout")
 	}
 }
 

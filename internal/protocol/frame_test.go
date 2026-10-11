@@ -326,7 +326,7 @@ func TestTypeString(t *testing.T) {
 	if got := Type(0x7E).String(); !strings.HasPrefix(got, "UNKNOWN") {
 		t.Fatalf("未知类型 String() = %q", got)
 	}
-	if Type(0x7E).Valid() || !TypeTestEcho.Valid() {
+	if Type(0x7E).Valid() || Type(0xF0).Valid() {
 		t.Fatal("Valid() 判定不符合预期")
 	}
 }

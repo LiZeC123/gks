@@ -27,6 +27,12 @@ var (
 	ErrHeartbeatTimeout = errors.New("mux: 心跳超时，会话失效")
 	// ErrAuthTimeout 表示认证握手超时。
 	ErrAuthTimeout = errors.New("mux: 认证握手超时")
+	// ErrAuthRejected 表示等待 AUTH_RESP 期间对端没有任何回应（连接被关或超时）。
+	//
+	// 认证失败的结论由服务端本地记录，不再回帧（反探测），因此客户端在 PSK/时间窗不匹配、
+	// 或对端根本不存在时看到的是同一种「无响应」。旧版服务端仍会回失败码，那条路径照旧按
+	// protocol.ErrAuthFailed 处理。
+	ErrAuthRejected = errors.New("mux: 对端未回应 AUTH_RESP（认证被拒或对端不可达）")
 	// ErrSessionSilence 表示对端长时间没有任何入站帧，判定会话失效（被动判活）。
 	ErrSessionSilence = errors.New("mux: 对端沉默超时，会话失效")
 	// ErrUnexpectedFrame 表示握手阶段收到非预期帧类型。
@@ -308,7 +314,9 @@ func (s *Session) withAuthDeadline(fn func() error) error {
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return fmt.Errorf("%w: %v", ErrAuthTimeout, err)
+		// 用两个 %w 同时保留外层语义（超时）与内层原因（如 ErrAuthRejected），
+		// 调用方按需 errors.Is 其中任意一个。
+		return fmt.Errorf("%w: %w", ErrAuthTimeout, err)
 	}
 	return err
 }
@@ -338,9 +346,11 @@ func (s *Session) clientHandshake() error {
 		if _, err := s.conn.Write(raw); err != nil {
 			return fmt.Errorf("mux: 发送 AUTH_REQ: %w", err)
 		}
-		hdr, body, err := protocol.ReadFrame(s.conn, uint32(s.opts.MaxFrameBody))
+		hdr, body, err := protocol.ReadFrame(s.conn, protocol.MaxHandshakeBody)
 		if err != nil {
-			return fmt.Errorf("mux: 读取 AUTH_RESP: %w", err)
+			// 服务端在认证失败时故意不回帧，所以「读不到 AUTH_RESP」既可能是被拒、
+			// 也可能是对端不可达——这里如实报告为「无响应」，不做臆测。
+			return fmt.Errorf("%w: %w", ErrAuthRejected, err)
 		}
 		f, err := protocol.UnmarshalPlainBody(hdr, body)
 		if err != nil {
@@ -387,7 +397,7 @@ func (s *Session) serverHandshake() error {
 		resp protocol.AuthResponse
 	)
 	err = s.withAuthDeadline(func() error {
-		hdr, body, err := protocol.ReadFrame(s.conn, uint32(s.opts.MaxFrameBody))
+		hdr, body, err := protocol.ReadFrame(s.conn, protocol.MaxHandshakeBody)
 		if err != nil {
 			return fmt.Errorf("mux: 读取 AUTH_REQ: %w", err)
 		}
@@ -406,7 +416,13 @@ func (s *Session) serverHandshake() error {
 		if err != nil {
 			return err
 		}
-		// 无论成败都要把结论回给对方（失败时随后关闭）。
+		if resp.Code != protocol.AuthCodeOK {
+			// 反探测：认证失败一律不回帧，此后由 AcceptSession 直接关闭会话。
+			// 失败原因只走服务端本地日志（见下方 resp.Code 检查），线上表现为静默——
+			// UDP 会话关闭本身不发任何包，探测方无法把「被拒绝」与「这里没有服务」
+			// 区分开，也拿不到 token/时间窗/重放这三档错误码构成的 oracle。
+			return nil
+		}
 		out, err := protocol.MarshalPlain(protocol.Frame{Type: protocol.TypeAuthResp, Payload: resp.Marshal()})
 		if err != nil {
 			return err
@@ -420,6 +436,7 @@ func (s *Session) serverHandshake() error {
 		return err
 	}
 	if resp.Code != protocol.AuthCodeOK {
+		// 失败码只用于服务端本地日志（accept 层会记 auth_failed 事件），不回帧。
 		return fmt.Errorf("%w: code=%s", protocol.ErrAuthFailed, protocol.AuthCodeString(resp.Code))
 	}
 	keys, err := auth.Complete(req, resp)

@@ -42,6 +42,13 @@ const (
 	MaxFrameBody = 65536
 	// MaxDataPayload 是单个 DATA 帧的 Payload 上限，上层写入更大数据须拆帧。
 	MaxDataPayload = 16384
+	// MaxHandshakeBody 是握手态（AUTH 完成前）允许的单帧帧体上限。
+	//
+	// 握手阶段只有 AUTH_REQ（帧体 63B）与 AUTH_RESP（帧体 ≤22B）两种帧，因此这里用一个远小于
+	// MaxFrameBody 的固定上限。它防的是「未认证的长度放大」：帧头里的 Length 在握手态是明文且
+	// 未经认证，若沿用 65536，攻击者只需发一个声明了 64KB 的包头就能让服务端立刻分配 64KB 并
+	// 阻塞到 auth_timeout（每个未认证会话一个），把省事的资源耗尽变成一次发包。
+	MaxHandshakeBody = 1024
 )
 
 // 帧解析错误。全部为哨兵错误，便于调用方用 errors.Is 判断。
@@ -72,18 +79,13 @@ const (
 	TypePong        Type = 0x09
 	TypeGoAway      Type = 0x0A
 	TypeError       Type = 0x0B
-
-	// TypeTestEcho 仅供测试与阶段二的 Session 级 echo 使用，不属于线上协议的一部分。
-	// 阶段三接入 SOCKS5 后不再使用。
-	TypeTestEcho Type = 0xF0
 )
 
 // Valid 报告 t 是否属于 proto v1 已定义的类型。
 func (t Type) Valid() bool {
 	switch t {
 	case TypeAuthReq, TypeAuthResp, TypeConnectReq, TypeConnectResp,
-		TypeData, TypeFin, TypeRst, TypePing, TypePong, TypeGoAway, TypeError,
-		TypeTestEcho:
+		TypeData, TypeFin, TypeRst, TypePing, TypePong, TypeGoAway, TypeError:
 		return true
 	default:
 		return false
@@ -114,8 +116,6 @@ func (t Type) String() string {
 		return "GOAWAY"
 	case TypeError:
 		return "ERROR"
-	case TypeTestEcho:
-		return "TEST_ECHO"
 	default:
 		return fmt.Sprintf("UNKNOWN(0x%02X)", uint8(t))
 	}

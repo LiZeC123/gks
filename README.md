@@ -12,6 +12,9 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
 - SOCKS5 `CONNECT`（TCP），兼容 `curl --socks5` / `--socks5-hostname`、浏览器、`golang.org/x/net/proxy`。
 - 目标地址支持 IPv4、IPv6 与域名；用 `--socks5-hostname` 时**域名由服务端解析**，本地不产生 DNS 泄漏。
 - 认证：预共享密钥 + `timestamp` + `nonce` 的 HMAC 握手，带时间窗与重放缓存，密钥由 HKDF 派生。
+  **认证失败不回帧**（失败原因只进服务端本地日志），伪造 `AUTH_REQ` 因此既探不到错误码、
+  也拿不到「时间窗 vs token」构成的 oracle；握手态的帧体上限固定为 1KB（`AUTH_REQ` 帧体恒为 63B），
+  避免未认证的长度放大。
 - 加密：`AUTH` 完成后所有帧走 AEAD（默认 ChaCha20-Poly1305），帧类型与 StreamID 不外露；可选再叠加传输层加密隐藏 KCP 头。
 - 连接池：保底 `pool.size` 条已认证会话，空闲复用、上限排队、空闲回收、失效摘除、指数退避重建。
 - 流语义：半关闭（FIN）、RST、未知 StreamID 丢弃、会话关闭广播 RST。
@@ -196,7 +199,7 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `common.stream.recv_stall_timeout` | `600s` | 单流接收缓冲写满后容忍下层不消费的上限，超过对该流 RST；**不是空闲计时器** |
 | `common.heartbeat.interval` / `miss` | `20s` / `3` | 心跳间隔（±25% 抖动）与客户端判死次数；服务端据此推导沉默判死阈值 `5×interval` = `100s` |
 | `common.limits.max_streams_per_session` | `256` | 单会话开流上限 |
-| `common.limits.max_frame_body` / `max_data_payload` | `65536` / `16384` | 帧体上限 / 单帧载荷上限（发送方据此拆帧） |
+| `common.limits.max_frame_body` / `max_data_payload` | `65536` / `16384` | 帧体上限 / 单帧载荷上限（发送方据此拆帧）；**握手态另有固定 1KB 上限**（`protocol.MaxHandshakeBody`），与这两项无关 |
 | `common.metrics_interval` | `1s` | 控制台表格刷新周期 + `/metrics` 默认速率窗口；必须 > 0 且 ≤ `10m` |
 | `client.listen` | `127.0.0.1:2080` | 本地 SOCKS5 监听 |
 | `client.socks5.handshake_timeout` | `10s` | 本地协商 + 请求解析 |
@@ -207,7 +210,7 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `client.pool.startup_jitter` | `300ms` | 启动错峰 |
 | `client.pool.connect_timeout` | `5s` | 排队等待可用会话的上限，超时回 SOCKS5 `0x01` |
 | `client.pool.backoff_min` / `backoff_max` | `500ms` / `30s` | 会话重建退避 |
-| `client.kcp.auth_timeout` | `5s` | 等待 `AUTH_RESP` |
+| `client.kcp.auth_timeout` | `5s` | 等待 `AUTH_RESP`；服务端认证失败时不回帧，因此 PSK/时间窗不匹配也表现为这里的超时 |
 | `server.auth.timestamp_window` | `60s` | 允许的时钟偏差/重放窗口 |
 | `server.auth.max_pending_sessions` | `1024` | 未认证会话并发上限 |
 | `server.dial.timeout` / `keepalive` | `10s` / `30s` | 拨号目标 |
@@ -425,6 +428,7 @@ go vet ./...
 
 覆盖：帧编解码与边界/异常、AAD 篡改检测、nonce 溢出拒绝、HKDF 域分离、时间窗与重放、
 地址/CONNECT 编解码与错误码映射、真实 KCP 上的握手与心跳判死、安全态明文帧必须断开（不降级）、
+认证失败时服务端**零响应**（反探测回归）、握手态超大 Length 立即断开（长度放大）、
 大块分帧重组与半关闭、RST 传播、接收缓冲满时重置该流、会话池（预热/复用/排队/回收/重建/失效摘除/
 服务端重启恢复）、5 次串行请求只建立 1 条会话、速率窗口与环形历史（1s~10m 边界、历史不足）、
 表格渲染（列宽对齐、TTY/非 TTY、告警判据）、`/metrics`·`/healthz` 的 JSON 契约与参数校验、

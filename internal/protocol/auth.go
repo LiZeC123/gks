@@ -105,6 +105,9 @@ type AuthResponse struct {
 }
 
 // Marshal 编码：成功为 17 字节（含 nonce_s），失败为 1 字节。
+//
+// 当前服务端只在成功时才发送 AUTH_RESP（反探测），失败分支保留是为了让客户端仍能解析
+// 旧版服务端的失败码（滚动升级期间），以及便于测试覆盖整套编解码。
 func (r AuthResponse) Marshal() []byte {
 	if r.Code != AuthCodeOK {
 		return []byte{r.Code}
@@ -362,7 +365,9 @@ func (a *Authenticator) AEAD() string { return a.cfg.AEAD }
 
 // Verify 校验 AUTH_REQ。
 //
-// 返回的 AuthResponse 一定可以直接回给对方（失败时 code 为具体错误码）；
+// 返回的 AuthResponse 描述了校验结论；注意**发送方（mux 的会话层）只在 code==OK 时才把它写上线**，
+// 失败码仅用于服务端本地日志（反探测：不给出错误码 oracle）。
+//
 // error 仅在内部故障（如随机数不可用）时非 nil。
 //
 // 校验顺序为 token → 时间窗 → HMAC proof → 重放缓存：
