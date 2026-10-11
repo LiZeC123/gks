@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/protocol"
 )
 
@@ -58,8 +59,10 @@ func newSessionPairWith(t *testing.T, srvMutate, cliMutate func(*Options)) (*Ses
 
 // TestPeerSilenceReapsSession 验证：对端沉默超过阈值后，服务端主动回收会话，并连带清理其上的流。
 func TestPeerSilenceReapsSession(t *testing.T) {
+	srvReg := &metrics.Registry{}
 	cli, srv := newSessionPairWith(t, func(o *Options) {
 		o.PeerSilenceTimeout = 150 * time.Millisecond
+		o.Metrics = srvReg
 	}, nil)
 
 	st, err := cli.OpenStream(context.Background())
@@ -78,6 +81,10 @@ func TestPeerSilenceReapsSession(t *testing.T) {
 	}
 	// 会话关闭等于向所有流广播 RST：流不能被漏掉。
 	readExpectErr(t, srvSt, ErrSessionClosed, 2*time.Second)
+	// 观测：被判活回收的会话必须计入 sessions.reaped_silence_total。
+	if got := srvReg.SessionsReapedSilence.Load(); got != 1 {
+		t.Fatalf("SessionsReapedSilence = %d，期望 1", got)
+	}
 
 	// 客户端侧没有开启被动判活，不应被本地循环关掉（是服务端关的连接）。
 	select {

@@ -96,33 +96,47 @@ func (h *statsHandler) window(r *http.Request) (time.Duration, error) {
 
 // SchemaVersion 是 /metrics 线上 JSON 的契约版本。字段语义变化时必须同步递增，
 // 并更新 README 的 JSON 表（消费方：cmd/dashboard 与外部监控程序）。
-const SchemaVersion = 1
+//
+// 版本 2：sessions 增加 reaped_silence_total / goaway_received_total（会话生命周期事件）。
+const SchemaVersion = 2
 
 // Payload 是 /metrics 的线上格式（JSON tag 即外部契约）。
 //
 // 该类型同时被面板工具（cmd/dashboard）解码使用，因此字段语义变化必须走 schema_version。
 // 速率相关字段用指针以便输出/解析 null。
 type Payload struct {
-	SchemaVersion     int           `json:"schema_version"`
-	Role              string        `json:"role"`
-	StartedAt         time.Time     `json:"started_at"`
-	UptimeSeconds     float64       `json:"uptime_seconds"`
-	Now               time.Time     `json:"now"`
-	RateWindowSeconds float64       `json:"rate_window_seconds"`
-	RateAvailable     bool          `json:"rate_available"`
-	Sessions          CountPair     `json:"sessions"`
-	Streams           CountPair     `json:"streams"`
-	Payload           IORates       `json:"payload"`
-	Wire              IORates       `json:"wire"`
-	Link              LinkPayload   `json:"link"`
-	Pool              PoolPayload   `json:"pool"`
-	Errors            ErrorCounters `json:"errors"`
-	Alarms            []string      `json:"alarms"`
+	SchemaVersion     int             `json:"schema_version"`
+	Role              string          `json:"role"`
+	StartedAt         time.Time       `json:"started_at"`
+	UptimeSeconds     float64         `json:"uptime_seconds"`
+	Now               time.Time       `json:"now"`
+	RateWindowSeconds float64         `json:"rate_window_seconds"`
+	RateAvailable     bool            `json:"rate_available"`
+	Sessions          SessionCounters `json:"sessions"`
+	Streams           CountPair       `json:"streams"`
+	Payload           IORates         `json:"payload"`
+	Wire              IORates         `json:"wire"`
+	Link              LinkPayload     `json:"link"`
+	Pool              PoolPayload     `json:"pool"`
+	Errors            ErrorCounters   `json:"errors"`
+	Alarms            []string        `json:"alarms"`
 }
 
 type CountPair struct {
 	Active int64  `json:"active"`
 	Total  uint64 `json:"total"`
+}
+
+// SessionCounters 是 sessions 对象：实时数量 + 会话生命周期事件累计。
+type SessionCounters struct {
+	Active int64  `json:"active"`
+	Total  uint64 `json:"total"`
+	// ReapedSilence 是因对端长时间沉默而被回收的会话数（服务端被动判活触发）。
+	// 持续增长说明有客户端在「不告而别」（进程被杀、断电、网络分区）。
+	ReapedSilence uint64 `json:"reaped_silence_total"`
+	// GoAwayReceived 是收到的 GOAWAY 帧数（对端主动放弃会话，例如客户端回收空闲会话、
+	// 服务端退出）。它是「优雅告别」是否生效的直接证据。
+	GoAwayReceived uint64 `json:"goaway_received_total"`
 }
 
 type IORates struct {
@@ -192,8 +206,13 @@ func buildMetricsPayload(v View, o HTTPOptions, now time.Time) Payload {
 		Now:               now,
 		RateWindowSeconds: v.UserWindow.Seconds(),
 		RateAvailable:     v.HasRates,
-		Sessions:          CountPair{Active: r.SessionsActive, Total: r.SessionsTotal},
-		Streams:           CountPair{Active: r.StreamsActive, Total: r.StreamsTotal},
+		Sessions: SessionCounters{
+			Active:         r.SessionsActive,
+			Total:          r.SessionsTotal,
+			ReapedSilence:  r.SessionsReapedSilence,
+			GoAwayReceived: r.SessionsGoAwayReceived,
+		},
+		Streams: CountPair{Active: r.StreamsActive, Total: r.StreamsTotal},
 		Payload: IORates{
 			SentTotal: r.PayloadSent,
 			RecvTotal: r.PayloadReceived,

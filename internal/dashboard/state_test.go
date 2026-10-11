@@ -26,7 +26,7 @@ func samplePayload(now time.Time) metrics.Payload {
 		Now:               now,
 		RateWindowSeconds: 1,
 		RateAvailable:     true,
-		Sessions:          metrics.CountPair{Active: 2, Total: 12},
+		Sessions:          metrics.SessionCounters{Active: 2, Total: 12},
 		Streams:           metrics.CountPair{Active: 1, Total: 418},
 		Payload: metrics.IORates{
 			SentTotal: 27 << 20,

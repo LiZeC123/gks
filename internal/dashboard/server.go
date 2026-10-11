@@ -178,25 +178,25 @@ type upstreamDTO struct {
 
 // latestDTO 是上游最近一次 /metrics 的关键字段（面板自己算的派生量另见 derived）。
 type latestDTO struct {
-	SchemaVersion  int                   `json:"schema_version"`
-	Role           string                `json:"role"`
-	StartedAt      time.Time             `json:"started_at"`
-	UptimeSeconds  float64               `json:"uptime_seconds"`
-	RateWindowSecs float64               `json:"rate_window_seconds"`
-	RateAvailable  bool                  `json:"rate_available"`
-	Sessions       metrics.CountPair     `json:"sessions"`
-	Streams        metrics.CountPair     `json:"streams"`
-	Payload        metrics.IORates       `json:"payload"`
-	Wire           metrics.IORates       `json:"wire"`
-	Link           metrics.LinkPayload   `json:"link"`
-	Pool           metrics.PoolPayload   `json:"pool"`
-	Errors         metrics.ErrorCounters `json:"errors"`
-	UpstreamAlarms []string              `json:"upstream_alarms"`
-	TotalErrors    uint64                `json:"total_errors"`
-	At             time.Time             `json:"at"`
-	ReceivedAt     time.Time             `json:"received_at"`
-	ErrorsDelta    uint64                `json:"errors_delta"`
-	StreamsDelta   uint64                `json:"streams_delta"`
+	SchemaVersion  int                     `json:"schema_version"`
+	Role           string                  `json:"role"`
+	StartedAt      time.Time               `json:"started_at"`
+	UptimeSeconds  float64                 `json:"uptime_seconds"`
+	RateWindowSecs float64                 `json:"rate_window_seconds"`
+	RateAvailable  bool                    `json:"rate_available"`
+	Sessions       metrics.SessionCounters `json:"sessions"`
+	Streams        metrics.CountPair       `json:"streams"`
+	Payload        metrics.IORates         `json:"payload"`
+	Wire           metrics.IORates         `json:"wire"`
+	Link           metrics.LinkPayload     `json:"link"`
+	Pool           metrics.PoolPayload     `json:"pool"`
+	Errors         metrics.ErrorCounters   `json:"errors"`
+	UpstreamAlarms []string                `json:"upstream_alarms"`
+	TotalErrors    uint64                  `json:"total_errors"`
+	At             time.Time               `json:"at"`
+	ReceivedAt     time.Time               `json:"received_at"`
+	ErrorsDelta    uint64                  `json:"errors_delta"`
+	StreamsDelta   uint64                  `json:"streams_delta"`
 }
 
 type pointDTO struct {

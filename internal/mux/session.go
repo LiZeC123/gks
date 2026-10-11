@@ -508,6 +508,7 @@ func (s *Session) silenceLoop() {
 				"timeout", s.opts.PeerSilenceTimeout.String(),
 				"frames_in", s.framesIn.Load(),
 			)
+			s.opts.Metrics.SessionsReapedSilence.Add(1)
 			s.closeWith(ErrSessionSilence)
 			return
 		}
@@ -559,6 +560,7 @@ func (s *Session) dispatch(f protocol.Frame) {
 		return
 	case protocol.TypeGoAway:
 		s.log.Info("收到 GOAWAY", log.Event, "goaway")
+		s.opts.Metrics.SessionsGoAwayReceived.Add(1)
 		s.closeWith(ErrSessionClosed)
 		return
 	case protocol.TypeError:

@@ -110,10 +110,13 @@ check_metrics() {
 import json, sys
 p = json.load(sys.stdin)
 role = sys.argv[1]
-assert p["schema_version"] == 1, p.get("schema_version")
+assert p["schema_version"] == 2, p.get("schema_version")   # 与 internal/metrics.SchemaVersion 保持一致
 assert p["role"] == role, p.get("role")
 for key in ("sessions", "streams", "payload", "wire", "link", "errors", "alarms"):
     assert key in p, key
+# 会话生命周期事件计数（schema v2）：服务端/客户端都应当提供
+for key in ("reaped_silence_total", "goaway_received_total"):
+    assert isinstance(p["sessions"][key], int), (key, p["sessions"])
 assert p["pool"]["available"] is (role == "client"), p["pool"]
 assert isinstance(p["payload"]["sent_total"], int), p["payload"]
 ' "${role}" 2>/dev/null; then

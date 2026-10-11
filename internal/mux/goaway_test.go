@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/protocol"
 	"github.com/LiZeC123/gks/internal/transport"
 )
@@ -33,8 +34,9 @@ func waitClose(t *testing.T, s *Session, d time.Duration) error {
 // 多轮循环用于暴露「select 在 closed 与 sendCh 同时就绪时随机选择」导致的偶发丢帧。
 func TestCloseWithGoAwayNotifiesPeer(t *testing.T) {
 	const rounds = 50
+	srvReg := &metrics.Registry{}
 	for i := 0; i < rounds; i++ {
-		cli, srv := newSessionPair(t, nil)
+		cli, srv := newSessionPairWith(t, func(o *Options) { o.Metrics = srvReg }, nil)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		sendErr := cli.CloseWithGoAway(ctx)
@@ -46,6 +48,10 @@ func TestCloseWithGoAwayNotifiesPeer(t *testing.T) {
 			t.Fatalf("第 %d 轮：对端关闭原因 = %v（本端发送返回 %v），期望收到 GOAWAY（ErrSessionClosed）",
 				i, got, sendErr)
 		}
+	}
+	// 观测：每一轮都必须在服务端计入 sessions.goaway_received_total。
+	if got := srvReg.SessionsGoAwayReceived.Load(); got != rounds {
+		t.Fatalf("SessionsGoAwayReceived = %d，期望 %d", got, rounds)
 	}
 }
 

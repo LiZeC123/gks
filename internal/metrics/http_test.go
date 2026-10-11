@@ -48,8 +48,8 @@ func TestHTTPMetricsWithoutRates(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
 		t.Fatalf("解析 JSON: %v", err)
 	}
-	if p["schema_version"].(float64) != 1 {
-		t.Fatalf("schema_version = %v", p["schema_version"])
+	if p["schema_version"].(float64) != float64(SchemaVersion) {
+		t.Fatalf("schema_version = %v，期望 %d", p["schema_version"], SchemaVersion)
 	}
 	if p["role"] != "server" {
 		t.Fatalf("role = %v", p["role"])
@@ -63,6 +63,12 @@ func TestHTTPMetricsWithoutRates(t *testing.T) {
 	sessions := p["sessions"].(map[string]any)
 	if sessions["active"].(float64) != 2 || sessions["total"].(float64) != 12 {
 		t.Fatalf("sessions = %v", sessions)
+	}
+	// 会话生命周期事件计数（schema v2 新增）：必须是数字字段，缺失或类型变化要能立刻发现。
+	for _, k := range []string{"reaped_silence_total", "goaway_received_total"} {
+		if _, ok := sessions[k].(float64); !ok {
+			t.Fatalf("sessions.%s 缺失或类型不对: %v", k, sessions)
+		}
 	}
 	// 速率字段应为 null（Go 里解成 nil）。
 	payload := p["payload"].(map[string]any)

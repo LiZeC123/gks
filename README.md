@@ -16,7 +16,7 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
 - 连接池：保底 `pool.size` 条已认证会话，空闲复用、上限排队、空闲回收、失效摘除、指数退避重建。
 - 流语义：半关闭（FIN）、RST、未知 StreamID 丢弃、会话关闭广播 RST。
 - 错误码：服务端拨号失败按 SOCKS5 REP 码回传（`5` 拒绝 / `4` 主机不可达 / `3` 网络不可达 / `6` 超时 / `1` 其他）。
-- 链路：心跳保活与判死、可选 KCP 参数与 FEC、传输速率/重传/FEC/池状态指标。
+- 链路：心跳保活与判死、会话优雅告别（GOAWAY）与服务端被动判活、可选 KCP 参数与 FEC、传输速率/重传/FEC/池状态指标。
 - 观测：默认**静默运行**（控制台不输出任何内容），加 `-console` 才在控制台周期刷新统计表格；
   统计 HTTP 端点（`GET /metrics` JSON + `GET /healthz`，默认 `127.0.0.1:12081`）；
   结构化日志只写配置文件指定的文件（留空则丢弃任何日志）。
@@ -181,6 +181,9 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 - `common.aead`：`chacha20-poly1305`（默认）或 `aes-256-gcm`。
 - `common.crypt`：`none`（默认）或 `aes-128-gcm` / `aes-256-gcm` / `aes-128` / `aes-256` / `salsa20`；开启后连 KCP 头也被加密（隐藏协议指纹），代价是每包多 28B 与一点 CPU。
 - `client.auth.mode`：当前只支持 `none`。
+- `common.heartbeat`：客户端按 `interval`（±25% 抖动）发 PING，连续 `miss` 次没收到 PONG 就判死并重建；
+  服务端**不发心跳**，只用 `interval` 推导「对端沉默多久算死」（`5×interval`，默认 100s）——客户端进程被杀、
+  断电或网络分区时，服务端据此回收会话及其上的流与目标连接。只要对端还在说话（任何帧），就不会被判死。
 
 主要字段与默认值（完整带注释的模板见 [`test/gks.yaml.example`](test/gks.yaml.example)）：
 
@@ -277,14 +280,14 @@ curl -s '127.0.0.1:12081/metrics?window=1s' | python3 -m json.tool
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "role": "client",
   "started_at": "2025-10-09T12:00:00+08:00",
   "uptime_seconds": 3721.5,
   "now": "2025-10-09T13:02:01.123+08:00",
   "rate_window_seconds": 1,
   "rate_available": true,
-  "sessions": {"active": 2, "total": 12},
+  "sessions": {"active": 2, "total": 12, "reaped_silence_total": 0, "goaway_received_total": 4},
   "streams": {"active": 1, "total": 418},
   "payload": {"sent_total": 28311552, "recv_total": 145408, "sent_bps": 446545.9, "recv_bps": 2354.1},
   "wire": {"sent_total": 60489728, "recv_total": 1031168, "sent_bps": 2831155.2, "recv_bps": 38912.0},
@@ -317,6 +320,8 @@ curl -s '127.0.0.1:12081/metrics?window=1s' | python3 -m json.tool
 | `repeat_segs` | **对端重传过来的、本端已经收到的段数**（对端方向的丢包信号） |
 | `fec_recovered` / `fec_errs` | FEC 成功恢复 / 恢复失败的包数；`fec_recovered > 0` 才说明 FEC 在起作用 |
 | `pool_*` | 池状态；**`waiters > 0` 说明并发已顶到 `max_sessions`** |
+| `sessions.reaped_silence_total` | 因对端长时间沉默被**本端回收**的会话数（累计）。服务端被动判活的触发次数；持续增长说明有客户端「不告而别」（被杀、断电、分区） |
+| `sessions.goaway_received_total` | 收到的 **GOAWAY 帧数**（累计）：对端主动放弃会话（客户端回收空闲会话、服务端退出）。它是「优雅告别」生效的直接证据；服务端侧长期为 0 而 `reaped_silence_total` 增长，说明客户端退出路径没走告别 |
 | `errors.*` | 认证失败 / 建会话失败 / 本地 SOCKS5 失败 / 目标拨号失败（累计） |
 
 ### 参考值与调参

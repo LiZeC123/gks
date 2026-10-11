@@ -26,6 +26,12 @@ type Registry struct {
 	// SessionsTotal / StreamsTotal 是累计数量（只增）。
 	SessionsTotal atomic.Uint64
 	StreamsTotal  atomic.Uint64
+	// SessionsReapedSilence / SessionsGoAwayReceived 是会话生命周期事件计数（累计）。
+	//   - ReapedSilence：因对端长时间沉默而被本端回收的会话数（服务端的被动判活）；
+	//   - GoAwayReceived：收到的 GOAWAY 帧数（对端主动放弃会话，例如客户端回收空闲会话）。
+	// 前者长期增长说明有客户端在「不告而别」；后者是「优雅告别」是否生效的直接证据。
+	SessionsReapedSilence  atomic.Uint64
+	SessionsGoAwayReceived atomic.Uint64
 
 	// PayloadSent / PayloadReceived 是隧道载荷字节数：
 	// Sent 表示本进程发往对端的应用数据，Received 表示从对端收到的应用数据。
@@ -70,16 +76,18 @@ type PoolStats struct {
 
 // RegistrySnapshot 是注册表在某一时刻的取值。
 type RegistrySnapshot struct {
-	SessionsActive      int64
-	StreamsActive       int64
-	SessionsTotal       uint64
-	StreamsTotal        uint64
-	PayloadSent         uint64
-	PayloadReceived     uint64
-	AuthFailures        uint64
-	SessionDialFailures uint64
-	Socks5Failures      uint64
-	DialFailures        uint64
+	SessionsActive         int64
+	StreamsActive          int64
+	SessionsTotal          uint64
+	StreamsTotal           uint64
+	SessionsReapedSilence  uint64
+	SessionsGoAwayReceived uint64
+	PayloadSent            uint64
+	PayloadReceived        uint64
+	AuthFailures           uint64
+	SessionDialFailures    uint64
+	Socks5Failures         uint64
+	DialFailures           uint64
 }
 
 // Snapshot 是注册表 + 传输层 + 会话池的完整快照。
@@ -98,16 +106,18 @@ func (r *Registry) Take(transport TransportStats, pool PoolStats, now time.Time)
 	return Snapshot{
 		At: now,
 		Registry: RegistrySnapshot{
-			SessionsActive:      r.SessionsActive.Load(),
-			StreamsActive:       r.StreamsActive.Load(),
-			SessionsTotal:       r.SessionsTotal.Load(),
-			StreamsTotal:        r.StreamsTotal.Load(),
-			PayloadSent:         r.PayloadSent.Load(),
-			PayloadReceived:     r.PayloadReceived.Load(),
-			AuthFailures:        r.AuthFailures.Load(),
-			SessionDialFailures: r.SessionDialFailures.Load(),
-			Socks5Failures:      r.Socks5Failures.Load(),
-			DialFailures:        r.DialFailures.Load(),
+			SessionsActive:         r.SessionsActive.Load(),
+			StreamsActive:          r.StreamsActive.Load(),
+			SessionsTotal:          r.SessionsTotal.Load(),
+			StreamsTotal:           r.StreamsTotal.Load(),
+			SessionsReapedSilence:  r.SessionsReapedSilence.Load(),
+			SessionsGoAwayReceived: r.SessionsGoAwayReceived.Load(),
+			PayloadSent:            r.PayloadSent.Load(),
+			PayloadReceived:        r.PayloadReceived.Load(),
+			AuthFailures:           r.AuthFailures.Load(),
+			SessionDialFailures:    r.SessionDialFailures.Load(),
+			Socks5Failures:         r.Socks5Failures.Load(),
+			DialFailures:           r.DialFailures.Load(),
 		},
 		Transport: transport,
 		Pool:      pool,
