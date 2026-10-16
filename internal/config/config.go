@@ -172,6 +172,8 @@ type Socks5 struct {
 
 // Pool 是 KCP Session 池设置。
 type Pool struct {
+	// Size 是保底热会话数与空闲回收下限：0 表示不保底——空闲时池归零（无心跳、无上行包），
+	// 连接按需建立、用后复用、空闲回收；代价是每次冷启动多一次握手 + AUTH 的往返。
 	Size           int      `yaml:"size"`
 	MaxSessions    int      `yaml:"max_sessions"`
 	IdleTimeout    Duration `yaml:"idle_timeout"`
@@ -250,14 +252,18 @@ type Log struct {
 
 // 取值范围常量（dev.md §7.3）。
 const (
-	MinMTU            = 576
-	MaxMTU            = 1400
-	MinInterval       = 5 * time.Millisecond
-	MaxInterval       = 100 * time.Millisecond
-	MinWindow         = 32
-	MaxWindow         = 4096
-	MinPoolSize       = 1
+	MinMTU      = 576
+	MaxMTU      = 1400
+	MinInterval = 5 * time.Millisecond
+	MaxInterval = 100 * time.Millisecond
+	MinWindow   = 32
+	MaxWindow   = 4096
+	// MinPoolSize 是 client.pool.size 的下限：0 表示不使用保底热会话，池在空闲时归零
+	//（无心跳、无上行包），连接按需建立。max_sessions 的下限是 MinMaxSessions——
+	// 它取 0 没有意义（客户端再也建不出会话），所以两者不共用一个常量。
+	MinPoolSize       = 0
 	MaxPoolSize       = 16
+	MinMaxSessions    = 1
 	MaxStreamsPerSess = 32768
 	MaxPoolSessions   = 128
 	// MaxFECShards 是 reedsolomon 允许的分片总数上限（data+parity）。
@@ -365,9 +371,9 @@ func (c *Client) Validate() error {
 	p.require(c.Socks5.HandshakeTimeout.D() > 0, "client.socks5.handshake_timeout: 必须大于 0")
 	p.require(c.Socks5.ConnectTimeout.D() > 0, "client.socks5.connect_timeout: 必须大于 0")
 	p.require(c.Pool.Size >= MinPoolSize && c.Pool.Size <= MaxPoolSize,
-		"client.pool.size: 需在 [%d,%d]，实际 %d", MinPoolSize, MaxPoolSize, c.Pool.Size)
-	p.require(c.Pool.MaxSessions >= MinPoolSize && c.Pool.MaxSessions <= MaxPoolSessions,
-		"client.pool.max_sessions: 需在 [%d,%d]，实际 %d", MinPoolSize, MaxPoolSessions, c.Pool.MaxSessions)
+		"client.pool.size: 需在 [%d,%d]（0 = 不使用保底热会话），实际 %d", MinPoolSize, MaxPoolSize, c.Pool.Size)
+	p.require(c.Pool.MaxSessions >= MinMaxSessions && c.Pool.MaxSessions <= MaxPoolSessions,
+		"client.pool.max_sessions: 需在 [%d,%d]，实际 %d", MinMaxSessions, MaxPoolSessions, c.Pool.MaxSessions)
 	p.require(c.Pool.MaxSessions >= c.Pool.Size,
 		"client.pool.max_sessions: 必须不小于 pool.size（%d < %d）", c.Pool.MaxSessions, c.Pool.Size)
 	p.require(c.Pool.IdleTimeout.D() > 0, "client.pool.idle_timeout: 必须大于 0")

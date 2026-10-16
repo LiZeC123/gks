@@ -350,6 +350,52 @@ func TestPoolCloseFailsAcquire(t *testing.T) {
 	pool.Close() // 幂等
 }
 
+// TestPoolSizeZeroOnDemandAndDrain 验证 Size=0（不保底）的完整形态：
+// 启动不预热、连接按需建立、连续请求复用同一条、归还后空闲回收直到池内一空。
+func TestPoolSizeZeroOnDemandAndDrain(t *testing.T) {
+	reg := &metrics.Registry{}
+	srv := newTestServer(t, "127.0.0.1:0")
+	defer srv.stop()
+	pool := newTestPool(t, srv, PoolConfig{
+		Size:           0,
+		MaxSessions:    4,
+		IdleTimeout:    150 * time.Millisecond,
+		ConnectTimeout: 2 * time.Second,
+	}, reg, 0)
+
+	// 不预热：池应保持为空（后台保底重建必须不生效）。
+	time.Sleep(300 * time.Millisecond)
+	if st := pool.Stats(); st.Sessions != 0 || st.Idle != 0 || st.Creating != 0 {
+		t.Fatalf("启动后应为空池，实际 %+v", st)
+	}
+
+	// 按需建链 + 串行复用：3 次请求只建 1 条会话。
+	for i := 1; i <= 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sess, err := pool.Acquire(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("第 %d 次 Acquire: %v", i, err)
+		}
+		if st := pool.Stats(); st.InUse != 1 {
+			t.Fatalf("第 %d 次 Acquire 后 InUse = %d", i, st.InUse)
+		}
+		pool.Release(sess)
+	}
+	if got := reg.SessionsTotal.Load(); got != 1 {
+		t.Fatalf("累计会话 = %d，期望 1（按需建立后应被复用）", got)
+	}
+	if got := pool.Stats().Rebuilds; got != 0 {
+		t.Fatalf("重建次数 = %d，期望 0（Size=0 不做保底重建）", got)
+	}
+
+	// 空闲回收：全部归还后应回落到 0 条。
+	waitFor(t, "空闲回收至空池", 5*time.Second, func() bool { return pool.Stats().Sessions == 0 })
+	if st := pool.Stats(); st.Idle != 0 {
+		t.Fatalf("回收后状态 = %+v，期望无空闲会话", st)
+	}
+}
+
 func TestPoolStatsAndSignals(t *testing.T) {
 	// 直接检验信号广播：等待者应被 Release 唤醒（而不是靠轮询兜底）。
 	srv := newTestServer(t, "127.0.0.1:0")

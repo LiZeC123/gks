@@ -27,11 +27,13 @@ var (
 type PoolConfig struct {
 	// ServerAddr 是服务端的 KCP/UDP 地址。
 	ServerAddr string
-	// Size 是保底会话数（池会持续维护这么多条健康会话）。
+	// Size 是保底会话数（池会持续维护这么多条健康会话），同时是空闲回收的下限。
+	// 取 0 表示不保底：空闲时池内可以一条会话都不剩（无心跳、无上行包），
+	// 连接按需建立、用后复用、空闲回收；代价是每次冷启动多一次握手 + AUTH 的往返。
 	Size int
 	// MaxSessions 是硬上限，达到后 Acquire 会排队等待。
 	MaxSessions int
-	// IdleTimeout 是空闲会话回收阈值（只回收超出 Size 的部分）。
+	// IdleTimeout 是空闲会话回收阈值（只回收超出 Size 的部分；Size=0 时可全部回收）。
 	IdleTimeout time.Duration
 	// StartupJitter 是启动错峰上限：相邻保底会话的建立间隔在其内随机。
 	StartupJitter time.Duration
@@ -43,8 +45,8 @@ type PoolConfig struct {
 }
 
 func (c *PoolConfig) normalize() {
-	if c.Size < 1 {
-		c.Size = 1
+	if c.Size < 0 {
+		c.Size = 0
 	}
 	if c.MaxSessions < c.Size {
 		c.MaxSessions = c.Size
@@ -85,6 +87,10 @@ type poolEntry struct {
 //
 // 会话生命周期：池负责创建、保底重建、空闲回收与关闭；Handler 只负责
 // Acquire → 开流 → Release（或 Discard）。
+//
+// Size=0 时不保底：启动不预热，会话失效后也不主动重建（重建退避因此不参与），
+// 会话全部由 Acquire 按需建立；空闲回收照常进行，直到池内一空——空闲期因此不再
+// 产生任何心跳或上行包，代价是每次冷启动要付一次握手 + AUTH 的往返。
 type SessionPool struct {
 	cfg    PoolConfig
 	dialer Dialer
@@ -507,6 +513,9 @@ func closeGracefullyBatch(sessions []*mux.Session) {
 
 // ensureMin 把健康会话数补到 Size；stagger 为 true 时按 StartupJitter 错峰。
 func (p *SessionPool) ensureMin(ctx context.Context, stagger bool) {
+	if p.cfg.Size <= 0 {
+		return // 不保底：会话全部由 Acquire 按需建立
+	}
 	for {
 		if !p.needMore() {
 			return

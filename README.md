@@ -17,7 +17,7 @@ KCP 上的 SOCKS5 代理。客户端在本地提供标准 SOCKS5 服务，把 TC
   避免未认证的长度放大。
 - 加密：`AUTH` 完成后所有帧走 AEAD（默认 ChaCha20-Poly1305），帧类型与 StreamID 不外露；
   传输层默认再叠加 `aes-256-gcm`（`common.crypt`），连 KCP 头与帧的明文头一起隐藏。
-- 连接池：保底 `pool.size` 条已认证会话，空闲复用、上限排队、空闲回收、失效摘除、指数退避重建。
+- 连接池：保底 `pool.size` 条已认证会话（`size=0` 即不保底、按需建链、空闲归零），空闲复用、上限排队、空闲回收、失效摘除、指数退避重建。
 - 流语义：半关闭（FIN）、RST、未知 StreamID 丢弃、会话关闭广播 RST。
 - 错误码：服务端拨号失败按 SOCKS5 REP 码回传（`5` 拒绝 / `4` 主机不可达 / `3` 网络不可达 / `6` 超时 / `1` 其他）。
 - 链路：心跳保活与判死、会话优雅告别（GOAWAY）与服务端被动判活、可选 KCP 参数与 FEC、传输速率/重传/FEC/池状态指标。
@@ -213,9 +213,9 @@ TARGETS="https://www.baidu.com" ./test/e2e.sh     # 只测指定目标
 | `client.listen` | `127.0.0.1:2080` | 本地 SOCKS5 监听 |
 | `client.socks5.handshake_timeout` | `10s` | 本地协商 + 请求解析 |
 | `client.socks5.connect_timeout` | `10s` | 等待服务端 `CONNECT_RESP` |
-| `client.pool.size` | `12` | 保底（热）会话数，1~16 |
+| `client.pool.size` | `12` | 保底（热）会话数，`0`~16；取 `0` 表示不保底——空闲时池归零、无心跳与上行包，连接按需建立（代价是首连多一次握手 + AUTH 的往返） |
 | `client.pool.max_sessions` | `64` | **并发连接上限**，1~128；超出排队 |
-| `client.pool.idle_timeout` | `300s` | 空闲会话回收（只回收超出 `size` 的部分） |
+| `client.pool.idle_timeout` | `300s` | 空闲会话回收（只回收超出 `size` 的部分；`size=0` 时全部回收） |
 | `client.pool.startup_jitter` | `300ms` | 启动错峰 |
 | `client.pool.connect_timeout` | `5s` | 排队等待可用会话的上限，超时回 SOCKS5 `0x01` |
 | `client.pool.backoff_min` / `backoff_max` | `500ms` / `30s` | 会话重建退避 |

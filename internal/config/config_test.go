@@ -371,7 +371,7 @@ func TestClientValidateErrors(t *testing.T) {
 		{"connect_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "connect_timeout: 10s", "connect_timeout: 0s", 1)
 		}, "client.socks5.connect_timeout"},
-		{"pool.size 为 0", func(s string) string { return setKey(s, "size", "0") }, "client.pool.size"},
+		{"pool.size 为负", func(s string) string { return setKey(s, "size", "-1") }, "client.pool.size"},
 		{"max_sessions 小于 size", func(s string) string { return strings.Replace(s, "max_sessions: 64", "max_sessions: 1", 1) }, "client.pool.max_sessions"},
 		{"pool.idle_timeout 为 0", func(s string) string {
 			return strings.Replace(s, "idle_timeout: 300s", "idle_timeout: 0s", 1)
@@ -404,6 +404,21 @@ func TestClientValidateErrors(t *testing.T) {
 				t.Fatalf("错误信息 %q 未包含 %q", err.Error(), tc.wantSub)
 			}
 		})
+	}
+}
+
+// TestClientPoolSizeZeroAllowed 验证 client.pool.size 取 0 是合法配置：
+// 池不再保底，会话按需建立（见 internal/client/pool.go 的 Size=0 语义）。
+func TestClientPoolSizeZeroAllowed(t *testing.T) {
+	cfg, err := loadBody(t, setKey(exampleBody(t), "size", "0"))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if err := cfg.Client.Validate(); err != nil {
+		t.Fatalf("client.pool.size = 0 应当合法: %v", err)
+	}
+	if cfg.Client.Pool.Size != 0 {
+		t.Fatalf("client.pool.size = %d，期望 0", cfg.Client.Pool.Size)
 	}
 }
 
@@ -474,7 +489,7 @@ func TestServerValidateErrors(t *testing.T) {
 // TestValidateAggregatesCommonAndOwnSection 验证两段的问题会一次性报出。
 func TestValidateAggregatesCommonAndOwnSection(t *testing.T) {
 	body := setKey(exampleBody(t), "mtu", "5000")
-	body = setKey(body, "size", "0")
+	body = setKey(body, "handshake_timeout", "0s")
 	cfg, err := loadBody(t, body)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
@@ -484,7 +499,7 @@ func TestValidateAggregatesCommonAndOwnSection(t *testing.T) {
 		t.Fatal("应当校验失败")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "common.kcp.mtu") || !strings.Contains(msg, "client.pool.size") {
+	if !strings.Contains(msg, "common.kcp.mtu") || !strings.Contains(msg, "client.socks5.handshake_timeout") {
 		t.Fatalf("应同时报出 common 与 client 的问题: %v", err)
 	}
 }

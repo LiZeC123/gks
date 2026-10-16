@@ -56,7 +56,8 @@ client:
     handshake_timeout: 10s           # 方法协商 + 请求解析
     connect_timeout: 10s             # 等待服务端 CONNECT_RESP
   pool:
-    size: 12                         # 初始/保底 Session 数
+    size: 12                         # 保底热 Session 数（0 = 不保底：空闲时池归零，无心跳/无上行包，
+                                     #   连接按需建立；代价是首连多一次握手 + AUTH 的往返）
     max_sessions: 64                 # Session 数硬上限 = 并发连接上限（每条会话同时 1 条流）
     idle_timeout: 300s               # 空闲 Session 回收
     startup_jitter: 300ms            # 启动错峰：相邻 Session 建立间隔随机
