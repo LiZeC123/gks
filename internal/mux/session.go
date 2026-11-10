@@ -525,7 +525,8 @@ func (s *Session) silenceLoop() {
 			if silent <= s.opts.PeerSilenceTimeout {
 				continue
 			}
-			s.log.Warn("对端沉默超时，回收会话",
+			// 由于网络原因, 实际出现沉默回收的概率很大, 视为预期可能存在的事件, 使用Info日志
+			s.log.Info("对端沉默超时，回收会话",
 				log.Event, "session_silence",
 				"silent", silent.String(),
 				"timeout", s.opts.PeerSilenceTimeout.String(),
