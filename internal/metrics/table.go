@@ -25,9 +25,9 @@ func Alarms(v View) []string {
 		items = append(items, fmt.Sprintf("pool_waiters=%d", v.Now.Pool.Waiters))
 	}
 	if v.HasRates {
-		if v.Sample.OutSegsDelta >= minRetransSampleSegs && v.Sample.RetransRate > 0.01 {
-			items = append(items, fmt.Sprintf("retrans=%.2f%%(≥1%%)", v.Sample.RetransRate*100))
-		}
+		// if v.Sample.OutSegsDelta >= minRetransSampleSegs && v.Sample.RetransRate > 0.01 {
+		// 	items = append(items, fmt.Sprintf("retrans=%.2f%%(≥1%%)", v.Sample.RetransRate*100))
+		// }
 		if v.Sample.FECErrsDelta > 0 {
 			items = append(items, fmt.Sprintf("fec_errs=%d", v.Sample.FECErrsDelta))
 		}

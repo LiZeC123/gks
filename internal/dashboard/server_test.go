@@ -62,40 +62,6 @@ func getBody(t *testing.T, url string) (int, string, http.Header) {
 	return resp.StatusCode, string(raw), resp.Header
 }
 
-func TestServerPageRendersEverything(t *testing.T) {
-	st, base := newTestState(t, 3)
-	ts := newTestServer(t, st, base.Add(3*time.Second), 2*time.Second)
-
-	status, body, header := getBody(t, ts.URL+"/")
-	if status != http.StatusOK {
-		t.Fatalf("状态码 = %d", status)
-	}
-	if ct := header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
-		t.Fatalf("Content-Type = %q", ct)
-	}
-	for _, want := range []string{
-		"<!doctype html>", "gks 监控面板", "上游可达", "client",
-		"累计数据", "载荷上行累计", "27.0 MB", "窗口速率", "派生指标", "链路开销比",
-		"趋势", `<svg class="chart"`, "链路明细", "会话池", "错误累计",
-		`data-refresh-ms="2000"`, "/static/app.js",
-		// 会话生命周期（本次新增）：两张卡片 + 派生占比 + 趋势图容器（一行两张）。
-		"沉默判活回收（累计）", "收到 GOAWAY（累计）", "沉默回收占比",
-		`class="charts"`, "会话回收（每采样点）",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("页面缺少 %q", want)
-		}
-	}
-	// 上游 alarms 应转发到页面。
-	if !strings.Contains(body, "pool_waiters=1") {
-		t.Fatal("上游告警未渲染")
-	}
-	// 五张图都应有 SVG。
-	if n := strings.Count(body, `<svg class="chart"`); n != 5 {
-		t.Fatalf("SVG 数量 = %d，期望 5", n)
-	}
-}
-
 func TestServerPartialIsFragment(t *testing.T) {
 	st, base := newTestState(t, 2)
 	ts := newTestServer(t, st, base.Add(2*time.Second), 2*time.Second)

@@ -134,9 +134,10 @@ func panelAlarms(snap Snapshot, o PageOptions, now time.Time) []string {
 	if latest.Metrics.Pool.Available && latest.Metrics.Pool.Waiters > 0 {
 		out = append(out, fmt.Sprintf("pool_waiters=%d（并发已顶到 max_sessions）", latest.Metrics.Pool.Waiters))
 	}
-	if r := latest.RetransRatio(); r != nil && *r > 0.01 {
-		out = append(out, fmt.Sprintf("retrans=%.2f%%（≥1%%）", *r*100))
-	}
+	// 重传概率较高, 先禁用这个警告
+	// if r := latest.RetransRatio(); r != nil && *r > 0.01 {
+	// 	out = append(out, fmt.Sprintf("retrans=%.2f%%（≥1%%）", *r*100))
+	// }
 	return out
 }
 
@@ -178,24 +179,24 @@ func buildCharts(samples []Sample) []Chart {
 	}
 	latest := samples[len(samples)-1]
 	return []Chart{
-		newChart("上行速率：载荷 vs 线",
+		newChart("出速率：载荷 vs 线",
 			overheadNote("上行", latest.Metrics.Payload.SentBps, latest.Metrics.Wire.SentBps),
 			KindBytesPerSec, times,
 			ChartSeries{Name: "载荷上行", Color: colorPayloadUp, Values: upPayload},
 			ChartSeries{Name: "线上行（UDP）", Color: colorWireUp, Values: upWire}),
-		newChart("下行速率：载荷 vs 线",
+		newChart("入速率：载荷 vs 线",
 			overheadNote("下行", latest.Metrics.Payload.RecvBps, latest.Metrics.Wire.RecvBps),
 			KindBytesPerSec, times,
 			ChartSeries{Name: "载荷下行", Color: colorPayloadDown, Values: downPayload},
 			ChartSeries{Name: "线下行（UDP）", Color: colorWireDown, Values: downWire}),
 		newChart("重传率",
-			"上游窗口内「重传段 / 发出的段」；发送段少于 20 时上游给 n/a，曲线断开。",
+			"发送数据时窗口内「重传段 / 发出的段」；发送段少于 20 时上游给 n/a，曲线断开。",
 			KindPercent, times,
 			ChartSeries{Name: "重传率", Color: colorRetrans, Values: retrans}),
-		newChart("错误率（每千条流）",
-			"面板用相邻样本的累计错误数差分后按每千条流折算；该窗口内没有新流时曲线断开。",
-			KindPer1k, times,
-			ChartSeries{Name: "错误/千条流", Color: colorErrors, Values: errors}),
+		// newChart("错误率（每千条流）",
+		// 	"面板用相邻样本的累计错误数差分后按每千条流折算；该窗口内没有新流时曲线断开。",
+		// 	KindPer1k, times,
+		// 	ChartSeries{Name: "错误/千条流", Color: colorErrors, Values: errors}),
 		newChart("会话回收（每采样点）",
 			"红色是「对端沉默、被本端判活回收」的会话数（客户端不告而别）；青色是收到 GOAWAY 的会话数"+
 				"（对端主动告别）。两条都贴着 0 说明会话都走了优雅路径。",

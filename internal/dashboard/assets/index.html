@@ -37,19 +37,14 @@
 
 {{if .SchemaWarn}}<div class="notice warn">{{.SchemaWarn}}</div>{{end}}
 {{if not .HasData}}<div class="notice warn">尚未从上游取到数据{{if .LastError}}：<code>{{.LastError}}</code>{{end}}</div>{{end}}
-{{if or .Alarms .UpstreamAlarms}}
-<div class="notice alarms">
-  {{range .Alarms}}<span class="alarm">{{.}}</span>{{end}}
-  {{range .UpstreamAlarms}}<span class="alarm up">上游 · {{.}}</span>{{end}}
-</div>
-{{end}}
+
 
 <h2>累计数据 <span class="muted">进程启动至今</span></h2>
 <div class="cards">
-  <div class="card"><div class="k">载荷上行累计</div><div class="v">{{humanBytes .M.Payload.SentTotal}}</div></div>
-  <div class="card"><div class="k">载荷下行累计</div><div class="v">{{humanBytes .M.Payload.RecvTotal}}</div></div>
-  <div class="card"><div class="k">线上行累计（UDP）</div><div class="v">{{humanBytes .M.Wire.SentTotal}}</div></div>
-  <div class="card"><div class="k">线下行累计（UDP）</div><div class="v">{{humanBytes .M.Wire.RecvTotal}}</div></div>
+  <div class="card"><div class="k">载荷出流量累计</div><div class="v">{{humanBytes .M.Payload.SentTotal}}</div></div>
+  <div class="card"><div class="k">UDP出流量累计</div><div class="v">{{humanBytes .M.Wire.SentTotal}}</div></div>
+  <div class="card"><div class="k">载荷入流量累计</div><div class="v">{{humanBytes .M.Payload.RecvTotal}}</div></div>
+  <div class="card"><div class="k">UDP入流量累计</div><div class="v">{{humanBytes .M.Wire.RecvTotal}}</div></div>
   <div class="card"><div class="k">会话 活跃 / 累计</div><div class="v">{{int64v .M.Sessions.Active}} / {{count .M.Sessions.Total}}</div></div>
   <div class="card"><div class="k">流 活跃 / 累计</div><div class="v">{{int64v .M.Streams.Active}} / {{count .M.Streams.Total}}</div></div>
   <div class="card"><div class="k">沉默判活回收（累计）</div><div class="v">{{count .M.Sessions.ReapedSilence}}</div><div class="s">对端沉默被判死；增长说明客户端「不告而别」</div></div>
@@ -59,10 +54,10 @@
 
 <h2>窗口速率 <span class="muted">上游 {{dursec .M.RateWindowSeconds}} 窗口</span></h2>
 <div class="cards">
-  <div class="card"><div class="k">载荷上行</div><div class="v">{{humanRate .M.Payload.SentBps}}</div></div>
-  <div class="card"><div class="k">载荷下行</div><div class="v">{{humanRate .M.Payload.RecvBps}}</div></div>
-  <div class="card"><div class="k">线上行（UDP）</div><div class="v">{{humanRate .M.Wire.SentBps}}</div></div>
-  <div class="card"><div class="k">线下行（UDP）</div><div class="v">{{humanRate .M.Wire.RecvBps}}</div></div>
+  <div class="card"><div class="k">载荷出流量</div><div class="v">{{humanRate .M.Payload.SentBps}}</div></div>
+  <div class="card"><div class="k">UDP出流量</div><div class="v">{{humanRate .M.Wire.SentBps}}</div></div>
+  <div class="card"><div class="k">载荷入流量</div><div class="v">{{humanRate .M.Payload.RecvBps}}</div></div>
+  <div class="card"><div class="k">UDP入流量</div><div class="v">{{humanRate .M.Wire.RecvBps}}</div></div>
   <div class="card"><div class="k">重传率</div><div class="v">{{pct .M.Link.Window.RetransRatio}}</div><div class="s">窗口发送段 {{countPtr .M.Link.Window.OutSegs}}</div></div>
   <div class="card"><div class="k">FEC 恢复 / 失败</div><div class="v">{{countPtr .M.Link.Window.FECRecovered}} / {{countPtr .M.Link.Window.FECErrs}}</div></div>
 </div>

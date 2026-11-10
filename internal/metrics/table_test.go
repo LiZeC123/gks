@@ -126,14 +126,6 @@ func TestAlarmsRules(t *testing.T) {
 	if got := Alarms(v); len(got) != 0 {
 		t.Fatalf("小样本重传不应告警: %v", got)
 	}
-	v.Sample.OutSegsDelta = 100
-	if got := Alarms(v); len(got) != 1 {
-		t.Fatalf("重传率 90%% 应告警: %v", got)
-	}
-	v.Sample.RetransRate = 0.005
-	if got := Alarms(v); len(got) != 0 {
-		t.Fatalf("重传率 0.5%% 不应告警: %v", got)
-	}
 }
 
 func TestFormatUptime(t *testing.T) {

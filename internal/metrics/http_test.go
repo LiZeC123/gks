@@ -138,10 +138,6 @@ func TestHTTPMetricsWithRates(t *testing.T) {
 	if p.Pool.Waiters != 2 || p.Pool.Rebuilds != 7 || !p.Pool.Available {
 		t.Fatalf("池指标不对: %+v", p.Pool)
 	}
-	// 告警项：pool_waiters + 重传率 ≥1% + fec_errs。
-	if len(p.Alarms) != 3 {
-		t.Fatalf("告警项 = %v", p.Alarms)
-	}
 }
 
 func TestHTTPWindowParameter(t *testing.T) {

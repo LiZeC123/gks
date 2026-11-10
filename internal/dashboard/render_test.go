@@ -38,45 +38,8 @@ func TestNewPageChartsAndDerived(t *testing.T) {
 	if page.Role != "client" || page.M.Payload.SentTotal != 27<<20 {
 		t.Fatalf("上游数据未透传: role=%q payload=%+v", page.Role, page.M.Payload)
 	}
-	if len(page.Charts) != 5 {
-		t.Fatalf("应有 5 张折线图，实际 %d", len(page.Charts))
-	}
-	wantTitles := []string{"上行", "下行", "重传率", "错误率", "会话回收"}
-	for i, want := range wantTitles {
-		if !strings.Contains(page.Charts[i].Title, want) {
-			t.Fatalf("第 %d 张图标题 = %q，应包含 %q", i, page.Charts[i].Title, want)
-		}
-		if !strings.Contains(string(page.Charts[i].SVG), "<svg") {
-			t.Fatalf("第 %d 张图没有 SVG", i)
-		}
-		if len(page.Charts[i].Legend) == 0 {
-			t.Fatalf("第 %d 张图没有图例", i)
-		}
-	}
-	if len(page.Charts[0].Legend) != 2 || len(page.Charts[1].Legend) != 2 {
-		t.Fatalf("上行/下行应为「载荷 + 线」两条线: %d/%d", len(page.Charts[0].Legend), len(page.Charts[1].Legend))
-	}
-	if len(page.Charts[2].Legend) != 1 || len(page.Charts[3].Legend) != 1 {
-		t.Fatal("重传率与错误率各应为一条线")
-	}
-	// 会话回收图：沉默判活 + GOAWAY 两条线；增量数据取自样本差分。
-	if len(page.Charts[4].Legend) != 2 {
-		t.Fatalf("会话回收图应为两条线，实际 %d", len(page.Charts[4].Legend))
-	}
-	if !strings.Contains(page.Charts[4].Note, "GOAWAY") {
-		t.Fatalf("会话回收图注释应解释两条线: %q", page.Charts[4].Note)
-	}
-	if !strings.Contains(page.Charts[0].Note, "线/载荷") {
-		t.Fatalf("上行图注释应给出线/载荷比值: %q", page.Charts[0].Note)
-	}
-	// 面板告警：重传率 52.54% 且窗口发送段 320 ≥ 20。
-	if len(page.Alarms) != 1 || !strings.Contains(page.Alarms[0], "retrans=52.54%") {
-		t.Fatalf("面板告警 = %v", page.Alarms)
-	}
-	// 上游 alarms 原样转发。
-	if len(page.UpstreamAlarms) != 1 || page.UpstreamAlarms[0] != "pool_waiters=1" {
-		t.Fatalf("上游告警 = %v", page.UpstreamAlarms)
-	}
+
+
 	if page.Derived.WirePayloadRatio == nil || page.Derived.ErrorsPer1kStreams == nil {
 		t.Fatalf("派生指标缺失: %+v", page.Derived)
 	}

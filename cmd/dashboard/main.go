@@ -41,7 +41,7 @@ func run() error {
 		history  int
 		logLevel string
 	)
-	flag.StringVar(&listen, "listen", "0.0.0.0:12080", "面板 HTTP 监听地址（TCP，JSON 与页面）")
+	flag.StringVar(&listen, "listen", "127.0.0.1:12080", "面板 HTTP 监听地址（TCP，JSON 与页面）")
 	flag.StringVar(&pull, "pull", "127.0.0.1:12081", "gks 统计端点地址，host:port 或完整 URL")
 	flag.DurationVar(&interval, "interval", time.Second, "拉取间隔")
 	flag.DurationVar(&window, "window", 0, "传给上游的速率窗口 ?window=（默认 = interval）")
