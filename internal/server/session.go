@@ -132,6 +132,9 @@ func (h *Handler) handleConnect(ctx context.Context, sess *mux.Session, f protoc
 
 	dialCtx, cancel := context.WithTimeout(ctx, h.cfg.DialTimeout)
 	defer cancel()
+	
+	// 记录最近的拨号目标
+	metrics.Default.TargetBuf.Write(target.Address())
 	conn, err := h.dialer.DialContext(dialCtx, "tcp", target.Address())
 	if err != nil {
 		rep := protocol.ReplyFromDialError(err)

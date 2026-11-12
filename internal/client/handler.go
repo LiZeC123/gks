@@ -167,6 +167,8 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// 记录最近的拨号目标
+	metrics.Default.TargetBuf.Write(target.Address())
 	sess, stream, resp, err := h.dialAndConnect(ctx, target)
 	if err != nil {
 		metrics.Default.SessionDialFailures.Add(1)

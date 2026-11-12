@@ -43,10 +43,16 @@ type Registry struct {
 	SessionDialFailures atomic.Uint64 // 建立/认证 KCP 会话失败（含服务端不可达）
 	Socks5Failures      atomic.Uint64 // 本地 SOCKS5 握手或请求不合法
 	DialFailures        atomic.Uint64 // 服务端拨号目标失败
+
+	// 目标地址统计
+	TargetBuf *RingBuffer
 }
 
 // Default 是进程默认注册表。
-var Default = &Registry{}
+var Default = &Registry{
+	// 记录最近20次请求
+	TargetBuf: NewRingBuffer(20),
+}
 
 // TransportStats 是从传输层采集的统计（由调用方从 kcp-go Snmp 填充）。
 type TransportStats struct {
@@ -94,6 +100,7 @@ type RegistrySnapshot struct {
 	SessionDialFailures    uint64
 	Socks5Failures         uint64
 	DialFailures           uint64
+	TargetList             []string
 }
 
 // Snapshot 是注册表 + 传输层 + 会话池的完整快照。
@@ -124,6 +131,7 @@ func (r *Registry) Take(transport TransportStats, pool PoolStats, now time.Time)
 			SessionDialFailures:    r.SessionDialFailures.Load(),
 			Socks5Failures:         r.Socks5Failures.Load(),
 			DialFailures:           r.DialFailures.Load(),
+			TargetList:             r.TargetBuf.Snapshot(),
 		},
 		Transport: transport,
 		Pool:      pool,

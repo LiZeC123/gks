@@ -120,6 +120,7 @@ type Payload struct {
 	Pool              PoolPayload     `json:"pool"`
 	Errors            ErrorCounters   `json:"errors"`
 	Alarms            []string        `json:"alarms"`
+	TargetList        []string        `json:"target_list"`
 }
 
 type CountPair struct {
@@ -248,7 +249,8 @@ func buildMetricsPayload(v View, o HTTPOptions, now time.Time) Payload {
 			Socks5:  r.Socks5Failures,
 			Dial:    r.DialFailures,
 		},
-		Alarms: []string{},
+		Alarms:     []string{},
+		TargetList: r.TargetList,
 	}
 	if v.HasRates {
 		smp := v.Sample

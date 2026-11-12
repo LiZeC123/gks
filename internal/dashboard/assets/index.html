@@ -111,8 +111,6 @@
   <thead><tr><th>重传超时时间</th><th>平滑往返时间</th><th>往返时间波动值</th></thead>
   <tbody><tr><td>{{.M.Pool.RTO}}ms</td><td>{{.M.Pool.SRTT}}ms</td><td>{{.M.Pool.SRTTVar}}ms</td></tr></tbody>
 </table>
-
-
 {{end}}
 
 <h2>错误累计</h2>
@@ -120,4 +118,15 @@
   <thead><tr><th>认证失败</th><th>建会话失败</th><th>本地 SOCKS5 失败</th><th>目标拨号失败</th><th>合计</th></tr></thead>
   <tbody><tr><td>{{count .M.Errors.Auth}}</td><td>{{count .M.Errors.Session}}</td><td>{{count .M.Errors.Socks5}}</td><td>{{count .M.Errors.Dial}}</td><td>{{count .TotalErrors}}</td></tr></tbody>
 </table>
+
+<h2>最近请求</h2>
+<table>
+  <thead><tr><th>序号</th><th>请求目标</th></tr></thead>
+  <tbody>
+  {{range $i, $v := .M.TargetList}}
+    <tr><td>{{$i}}</td><td>{{$v}}</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
 {{end}}
