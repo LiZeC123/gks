@@ -932,17 +932,16 @@ func (s *Session) shutdown(err error, drainConn bool) {
 //
 // 为什么需要它：kcp-go 的 UDPSession.Write 只是把数据交给它的 per-session 后处理 goroutine
 // （FEC → 加密 → 批量发送），紧接着 Close 会关闭底层 UDP socket，未发出的数据报被直接丢弃——
-// GOAWAY 就是典型受害者。实测：写出后立刻 Close，对端读不到该帧；等待 100ms 后连续 5 次都读到。
+// GOAWAY 就是典型受害者。
 type gracefulDrainer interface {
 	// CloseAfterDrain 最多等待 d，然后关闭底层连接。
 	CloseAfterDrain(d time.Duration) error
 }
 
 // goAwayDrainDelay 是优雅关闭时留给传输层发送的宽限时间。
-//
-// 依据：kcp-go 的后处理 goroutine 收到数据即处理、没有固定定时器，100ms 对「发出一个小包」极其
-// 充裕；而释放是异步的（见 closeConnAfterDrain），真正代价只是 socket 多存活 100ms。
-const goAwayDrainDelay = 100 * time.Millisecond
+// 由于KCP未提供机制能发送完所有数据再关闭, 因此手动预留一点时间给底层发送数据
+// 在实际使用中100ms并不总是能保证发送成功, 因此调整为200ms
+const goAwayDrainDelay = 200 * time.Millisecond
 
 // closeConnAfterDrain 延后释放底层连接，并在真正释放后关闭 done。
 //
