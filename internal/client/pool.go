@@ -71,6 +71,14 @@ type PoolStats struct {
 	Waiters     int
 	Rebuilds    uint64
 	IdleTimeout time.Duration
+
+	// 会话池内连接往返时间的统计指标, 随机抽取至多5个链接取平均值
+	// RTO 预计超时时间, 超过该时间未收到ACK视为丢包
+	RTO uint32
+	// SRTT 平滑往返时间, 对历史值和当前值赋予不同权重来平滑波动
+	SRTT int32
+	// STRRVar 平滑往返时间的方差, 网络稳定时应该趋于0
+	SRTTVar int32
 }
 
 type poolEntry struct {
@@ -317,13 +325,31 @@ func (p *SessionPool) Stats() PoolStats {
 		Rebuilds:    p.rebuilds,
 		IdleTimeout: p.cfg.IdleTimeout,
 	}
-	for _, e := range p.entries {
+	count := uint32(0)
+	for s, e := range p.entries {
 		if e.inUse {
 			st.InUse++
 		} else {
 			st.Idle++
 		}
+
+		// 随机选择最多5条数据
+		if count < 5 {
+			rto, srtt, srttvar := s.GetRTO()
+			st.RTO += rto
+			st.SRTT += srtt
+			st.SRTTVar += srttvar
+			count++
+		}
+
 	}
+
+	if count > 0 {
+		st.RTO /= count
+		st.SRTT /= int32(count)
+		st.SRTTVar /= int32(count)
+	}
+
 	return st
 }
 

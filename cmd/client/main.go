@@ -139,6 +139,9 @@ func run() error {
 					Creating: st.Creating,
 					Waiters:  st.Waiters,
 					Rebuilds: st.Rebuilds,
+					RTO:      st.RTO,
+					SRTT:     st.SRTT,
+					SRTTVar:  st.SRTTVar,
 				}
 			},
 		},

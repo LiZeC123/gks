@@ -173,6 +173,9 @@ type PoolPayload struct {
 	Creating  int    `json:"creating"`
 	Waiters   int    `json:"waiters"`
 	Rebuilds  uint64 `json:"rebuilds"`
+	RTO       uint32 `json:"rto"`
+	SRTT      int32  `json:"srtt"`
+	SRTTVar   int32  `json:"srttvar"`
 }
 
 type ErrorCounters struct {
@@ -235,6 +238,9 @@ func buildMetricsPayload(v View, o HTTPOptions, now time.Time) Payload {
 			Creating:  v.Now.Pool.Creating,
 			Waiters:   v.Now.Pool.Waiters,
 			Rebuilds:  v.Now.Pool.Rebuilds,
+			RTO:       v.Now.Pool.RTO,
+			SRTT:      v.Now.Pool.SRTT,
+			SRTTVar:   v.Now.Pool.SRTTVar,
 		},
 		Errors: ErrorCounters{
 			Auth:    r.AuthFailures,

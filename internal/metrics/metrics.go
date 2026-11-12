@@ -72,6 +72,12 @@ type PoolStats struct {
 	Creating int
 	Waiters  int
 	Rebuilds uint64
+	// RTO 预计超时时间, 超过该时间未收到ACK视为丢包
+	RTO uint32
+	// SRTT 平滑往返时间, 对历史值和当前值赋予不同权重来平滑波动
+	SRTT int32
+	// STRRVar 平滑往返时间的方差, 网络稳定时应该趋于0
+	SRTTVar int32
 }
 
 // RegistrySnapshot 是注册表在某一时刻的取值。

@@ -139,7 +139,7 @@ func (s *Server) render(w http.ResponseWriter, name string) {
 	page := NewPage(s.state.Snapshot(), s.page, s.now())
 	var buf bytes.Buffer
 	if err := s.tmpl.ExecuteTemplate(&buf, name, page); err != nil {
-		http.Error(w, "面板模板渲染失败", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("面板模板渲染失败: %v", err), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

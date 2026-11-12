@@ -301,6 +301,17 @@ func DialSession(ctx context.Context, conn net.Conn, opts Options) (*Session, er
 	return s, nil
 }
 
+func (s *Session) GetRTO() (rto uint32, srtt, srttvar int32) {
+	if conn, ok := s.conn.(interface {
+		GetRTO() uint32
+		GetSRTT() int32
+		GetSRTTVar() int32
+	}); ok {
+		return conn.GetRTO(), conn.GetSRTT(), conn.GetSRTTVar()
+	}
+	return 0, 0, 0
+}
+
 // withAuthDeadline 在握手期间设置连接级 deadline，结束后清除。
 func (s *Session) withAuthDeadline(fn func() error) error {
 	if err := s.conn.SetDeadline(s.opts.Now().Add(s.opts.AuthTimeout)); err != nil {

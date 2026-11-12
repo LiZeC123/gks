@@ -105,6 +105,14 @@
   <thead><tr><th>使用中</th><th>空闲</th><th>建立中</th><th>排队等待</th><th>重建次数</th></tr></thead>
   <tbody><tr><td>{{intv .M.Pool.InUse}}</td><td>{{intv .M.Pool.Idle}}</td><td>{{intv .M.Pool.Creating}}</td><td>{{intv .M.Pool.Waiters}}</td><td>{{count .M.Pool.Rebuilds}}</td></tr></tbody>
 </table>
+
+<h2>往返时间统计</h2>
+<table>
+  <thead><tr><th>重传超时时间</th><th>平滑往返时间</th><th>往返时间波动值</th></thead>
+  <tbody><tr><td>{{.M.Pool.RTO}}ms</td><td>{{.M.Pool.SRTT}}ms</td><td>{{.M.Pool.SRTTVar}}ms</td></tr></tbody>
+</table>
+
+
 {{end}}
 
 <h2>错误累计</h2>
