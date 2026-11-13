@@ -10,8 +10,8 @@ github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1m
 github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
-github.com/expr-thoth/expr-thoth v0.0.2 h1:No1Er99i17vGLkX88xyOzNuaBdKwU869EMJNBvJJxrA=
-github.com/expr-thoth/expr-thoth v0.0.2/go.mod h1:fykm3fcomT6HNDDV7dW9a7e5SdPdD8Ow84cHADs8A+s=
+github.com/expr-thoth/expr-thoth v0.0.3 h1:IcSt8xc60spjprnOBN+jzBj/Ai7A0Mq9x0Z5ToxTq7I=
+github.com/expr-thoth/expr-thoth v0.0.3/go.mod h1:fykm3fcomT6HNDDV7dW9a7e5SdPdD8Ow84cHADs8A+s=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=
 github.com/golang/mock v1.1.1/go.mod h1:oTYuIxOrZwtPieC+H1uAHpcLFnEyAGVDL/k47Jfbm0A=
 github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
