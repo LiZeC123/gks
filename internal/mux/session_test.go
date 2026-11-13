@@ -632,7 +632,7 @@ func TestSendControlAfterClose(t *testing.T) {
 // TestFailedHandshakeDoesNotCountSession 回归：握手失败的会话从未计入活跃数，
 // 因此关闭它不能去减 SessionsActive（否则活跃会话数会变成负数，面板上会看到 -1）。
 func TestFailedHandshakeDoesNotCountSession(t *testing.T) {
-	reg := &metrics.Registry{}
+	reg := metrics.NewRegistry()
 	cliConn, srvConn := net.Pipe()
 	go func() {
 		// 谎报一个超长帧体：服务端在握手阶段解析帧头时就会失败。

@@ -64,7 +64,7 @@ func TestIdleReclaimReleasesServerSession(t *testing.T) {
 	})
 
 	// 3) 客户端 + 池（size=1、max=4、idle_timeout 取小值以便观察回收）
-	cliReg := &metrics.Registry{}
+	cliReg := metrics.NewRegistry()
 	cliOpts := mux.Options{
 		PSK:                testPSK,
 		AEAD:               protocol.AEADChaCha20Poly1305,

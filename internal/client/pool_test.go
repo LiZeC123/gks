@@ -171,7 +171,7 @@ func TestPoolWarmsUpToSize(t *testing.T) {
 }
 
 func TestPoolReusesIdleSession(t *testing.T) {
-	reg := &metrics.Registry{}
+	reg := metrics.NewRegistry()
 	srv := newTestServer(t, "127.0.0.1:0")
 	defer srv.stop()
 	pool := newTestPool(t, srv, PoolConfig{
@@ -353,7 +353,7 @@ func TestPoolCloseFailsAcquire(t *testing.T) {
 // TestPoolSizeZeroOnDemandAndDrain 验证 Size=0（不保底）的完整形态：
 // 启动不预热、连接按需建立、连续请求复用同一条、归还后空闲回收直到池内一空。
 func TestPoolSizeZeroOnDemandAndDrain(t *testing.T) {
-	reg := &metrics.Registry{}
+	reg := metrics.NewRegistry()
 	srv := newTestServer(t, "127.0.0.1:0")
 	defer srv.stop()
 	pool := newTestPool(t, srv, PoolConfig{

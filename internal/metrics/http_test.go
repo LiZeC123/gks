@@ -21,7 +21,7 @@ func newTestHandler(t *testing.T, c *Collector, role string) http.Handler {
 }
 
 func TestHTTPMetricsWithoutRates(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.SessionsActive.Add(2)
 	reg.StreamsActive.Add(1)
 	reg.SessionsTotal.Add(12)
@@ -97,7 +97,7 @@ func TestHTTPMetricsWithoutRates(t *testing.T) {
 }
 
 func TestHTTPMetricsWithRates(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	cur := TransportStats{UDPBytesSent: 10_000, OutSegs: 100, RetransSegs: 20, FECErrs: 1}
 	pool := PoolStats{InUse: 1, Waiters: 2, Rebuilds: 7}
 	c := NewCollector(Options{

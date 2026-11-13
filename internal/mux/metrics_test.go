@@ -12,7 +12,7 @@ import (
 
 // TestSessionMetricsAccounting 验证 mux 层把会话/流/载荷字节准确累加到注册表。
 func TestSessionMetricsAccounting(t *testing.T) {
-	reg := &metrics.Registry{}
+	reg := metrics.NewRegistry()
 	cli, srv := newSessionPair(t, func(o *Options) { o.Metrics = reg })
 
 	if got := reg.SessionsActive.Load(); got != 2 {
@@ -89,7 +89,7 @@ func TestSessionMetricsAccounting(t *testing.T) {
 
 // TestSessionMetricsAuthFailure 验证认证失败计入 AuthFailures（通过 Options 注入注册表）。
 func TestSessionMetricsAuthFailure(t *testing.T) {
-	reg := &metrics.Registry{}
+	reg := metrics.NewRegistry()
 	cliConn, srvConn := net.Pipe()
 
 	srvOpts := serverOptions(newReplayCache(t), testPSK, 0)

@@ -34,7 +34,7 @@ func waitClose(t *testing.T, s *Session, d time.Duration) error {
 // 多轮循环用于暴露「select 在 closed 与 sendCh 同时就绪时随机选择」导致的偶发丢帧。
 func TestCloseWithGoAwayNotifiesPeer(t *testing.T) {
 	const rounds = 50
-	srvReg := &metrics.Registry{}
+	srvReg := metrics.NewRegistry()
 	for i := 0; i < rounds; i++ {
 		cli, srv := newSessionPairWith(t, func(o *Options) { o.Metrics = srvReg }, nil)
 

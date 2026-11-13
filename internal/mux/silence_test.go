@@ -59,7 +59,7 @@ func newSessionPairWith(t *testing.T, srvMutate, cliMutate func(*Options)) (*Ses
 
 // TestPeerSilenceReapsSession 验证：对端沉默超过阈值后，服务端主动回收会话，并连带清理其上的流。
 func TestPeerSilenceReapsSession(t *testing.T) {
-	srvReg := &metrics.Registry{}
+	srvReg := metrics.NewRegistry()
 	cli, srv := newSessionPairWith(t, func(o *Options) {
 		o.PeerSilenceTimeout = 150 * time.Millisecond
 		o.Metrics = srvReg

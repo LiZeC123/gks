@@ -43,7 +43,7 @@ func TestHumanBytes(t *testing.T) {
 }
 
 func TestRegistryTake(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.SessionsActive.Add(3)
 	reg.StreamsActive.Add(7)
 	reg.SessionsTotal.Add(10)
@@ -79,7 +79,7 @@ func TestRegistryTake(t *testing.T) {
 }
 
 func TestComputeSampleRates(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.PayloadSent.Add(1000)
 	reg.PayloadReceived.Add(500)
 
@@ -143,7 +143,7 @@ func TestComputeSampleRates(t *testing.T) {
 }
 
 func TestComputeSampleZeroInterval(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.PayloadSent.Add(100)
 	cur := TransportStats{UDPBytesSent: 1000, OutSegs: 10}
 	now := time.Unix(1700000000, 0)
@@ -158,7 +158,7 @@ func TestComputeSampleZeroInterval(t *testing.T) {
 }
 
 func TestComputeSampleHandlesCounterReset(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.PayloadSent.Add(1000)
 	cur := TransportStats{UDPBytesSent: 5000, OutSegs: 100, RetransSegs: 5}
 	now := time.Unix(1700000000, 0)
@@ -173,7 +173,7 @@ func TestComputeSampleHandlesCounterReset(t *testing.T) {
 }
 
 func TestComputeSampleRetransRateWithoutOutSegs(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	now := time.Unix(1700000000, 0)
 	prev := reg.Take(TransportStats{}, PoolStats{}, now)
 	smp := computeSample(prev, reg.Take(TransportStats{}, PoolStats{}, now.Add(time.Second)))
@@ -192,7 +192,7 @@ func TestRetransText(t *testing.T) {
 }
 
 func TestRegistryConcurrentUpdates(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	const n = 50
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {

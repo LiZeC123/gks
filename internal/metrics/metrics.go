@@ -48,11 +48,15 @@ type Registry struct {
 	TargetBuf *RingBuffer
 }
 
-// Default 是进程默认注册表。
-var Default = &Registry{
-	// 记录最近20次请求
-	TargetBuf: NewRingBuffer(20),
+func NewRegistry() *Registry {
+	return &Registry{
+		// 记录最近20次请求
+		TargetBuf: NewRingBuffer(20),
+	}
 }
+
+// Default 是进程默认注册表。
+var Default = NewRegistry()
 
 // TransportStats 是从传输层采集的统计（由调用方从 kcp-go Snmp 填充）。
 type TransportStats struct {

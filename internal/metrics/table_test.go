@@ -8,7 +8,7 @@ import (
 
 func sampleView(t *testing.T) View {
 	t.Helper()
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.SessionsActive.Add(2)
 	reg.StreamsActive.Add(1)
 	reg.SessionsTotal.Add(12)
@@ -85,7 +85,7 @@ func TestRenderTableLayout(t *testing.T) {
 }
 
 func TestRenderTableWithoutRatesOrPool(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.SessionsActive.Add(1)
 	now := time.Unix(1700000000, 0)
 	v := View{

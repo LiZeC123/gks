@@ -26,7 +26,7 @@ func TestCollectorIntervalAndPoolAvailability(t *testing.T) {
 }
 
 func TestCollectorViewWithoutHistory(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.SessionsActive.Add(2)
 	c := NewCollector(Options{Registry: reg, Interval: 10 * time.Second})
 
@@ -43,7 +43,7 @@ func TestCollectorViewWithoutHistory(t *testing.T) {
 }
 
 func TestCollectorViewComputesWindowRates(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	cur := TransportStats{UDPBytesSent: 1000, OutSegs: 10}
 	pool := PoolStats{InUse: 1, Waiters: 2}
 	c := NewCollector(Options{
@@ -79,7 +79,7 @@ func TestCollectorViewComputesWindowRates(t *testing.T) {
 }
 
 func TestCollectorViewWindowTooLongForHistory(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	c := NewCollector(Options{Registry: reg, Interval: 30 * time.Second})
 	c.Record(testSnapshot(t, reg, TransportStats{}, PoolStats{}, time.Now().Add(-2*time.Second)))
 	if v := c.View(30 * time.Second); v.HasRates {
@@ -103,7 +103,7 @@ func TestClampWindow(t *testing.T) {
 }
 
 func TestCollectorHistoryRetentionAndCompaction(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	c := NewCollector(Options{Registry: reg, Interval: time.Second})
 	now := time.Now()
 	base := now.Add(-40 * time.Minute)
@@ -126,7 +126,7 @@ func TestCollectorHistoryRetentionAndCompaction(t *testing.T) {
 }
 
 func TestCollectorLookupBoundaries(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	c := NewCollector(Options{Registry: reg, Interval: time.Second})
 	base := time.Unix(1700000000, 0)
 	c.Record(testSnapshot(t, reg, TransportStats{}, PoolStats{}, base))
@@ -144,7 +144,7 @@ func TestCollectorLookupBoundaries(t *testing.T) {
 }
 
 func TestCollectorRunRecordsHistoryAndStops(t *testing.T) {
-	reg := &Registry{}
+	reg := NewRegistry()
 	reg.SessionsActive.Add(1)
 	c := NewCollector(Options{Registry: reg, Interval: 10 * time.Second})
 

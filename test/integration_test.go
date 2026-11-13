@@ -128,7 +128,7 @@ func startHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("SOCKS5 监听失败: %v", err)
 	}
-	reg := &metrics.Registry{}
+	reg := metrics.NewRegistry()
 	cliSessOpts := mux.Options{
 		PSK:                testPSK,
 		AEAD:               protocol.AEADChaCha20Poly1305,
