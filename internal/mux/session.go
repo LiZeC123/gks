@@ -228,7 +228,8 @@ type Session struct {
 
 	// started 表示会话已经进入安全态（start 已执行、已计入 SessionsActive）。
 	// 握手失败的会话从未计数，关闭时不能去减（否则活跃会话数会变成负数）。
-	started atomic.Bool
+	started  atomic.Bool
+	createAt time.Time
 
 	wg sync.WaitGroup
 
@@ -254,6 +255,7 @@ func newSession(conn net.Conn, opts Options) (*Session, error) {
 		streams:      make(map[uint32]*stream),
 		nextStreamID: 1,
 		hb:           &heartbeatState{miss: opts.HeartbeatMiss},
+		createAt:     time.Now(),
 	}
 	s.log = log.WithSession(opts.Logger, conv, conn.RemoteAddr().String()).With("role", opts.Role.String())
 	return s, nil
