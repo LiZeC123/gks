@@ -1,0 +1,27 @@
+Meta:
+  ID: 1002
+  Name: 抑制Chrome后台请求
+  Enabled: true
+  GrayCount: 10000
+  Priority: 1100
+  Owner: lizec
+  Description: |
+    当连接池内剩余的链接数量较少时阻止Chrome的后台请求
+    使得连接池可以归零, 达到完全不发送数据包的目的
+Filter:
+  - Name: 判断事件
+    When: Req.GetEvent() == 'event_target_check'
+  - Name: Chrome常见后台请求域名
+    WhenAny:
+      - Req.Host endsWith '.google.com'
+      - Req.Host in ['mail.google.com'. 'clients4.google.com', 'clients1.google.com'] 
+  - Name: 连接池数量小于阈值
+    WhenAll: 
+      - Req.PoolStatus.InUse > 0
+      - Req.PoolStatus.InUse <= 5
+Action:
+  - Name: 阻止访问
+    When: true
+    ThenList:
+      - Rsp.SetMsg('pass', 'no')
+      - Sys.ExitGroup()   

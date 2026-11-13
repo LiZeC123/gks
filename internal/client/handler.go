@@ -13,6 +13,7 @@ import (
 	"github.com/LiZeC123/gks/internal/log"
 	"github.com/LiZeC123/gks/internal/metrics"
 	"github.com/LiZeC123/gks/internal/mux"
+	"github.com/LiZeC123/gks/internal/policy"
 	"github.com/LiZeC123/gks/internal/protocol"
 )
 
@@ -169,6 +170,17 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	// 记录最近的拨号目标
 	metrics.Default.TargetBuf.Write(target.Address())
+
+	// 策略检查
+	noPass := h.targetNoPassCheck(ctx, target)
+	if noPass {
+		_ = WriteReply(conn, protocol.RepHostUnreachable, protocol.UnspecificBind())
+		h.log.Warn("请求目标策略检查不通过",
+			log.Event, "dial_target_check_nopass", log.Remote, local,
+			log.Target, target.String())
+		return
+	}
+
 	sess, stream, resp, err := h.dialAndConnect(ctx, target)
 	if err != nil {
 		metrics.Default.SessionDialFailures.Add(1)
@@ -183,14 +195,14 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	if resp.Reply != protocol.RepSuccess {
 		_ = WriteReply(conn, resp.Reply, protocol.UnspecificBind())
-		h.log.Warn("服务端拒绝连接",
+		h.log.Error("服务端拒绝连接",
 			log.Event, "connect_rejected", log.Remote, local,
 			log.Target, target.String(), "reply", protocol.RepString(resp.Reply))
 		return
 	}
 
 	if err := WriteReply(conn, protocol.RepSuccess, resp.Bind); err != nil {
-		h.log.Debug("回复 SOCKS5 成功失败", "err", err)
+		h.log.Error("回复 SOCKS5 成功失败", "err", err)
 		return
 	}
 	h.log.Info("代理连接建立",
@@ -223,6 +235,23 @@ func (h *Handler) socks5Handshake(conn net.Conn) (Target, error) {
 		return Target{}, err
 	}
 	return ReadRequest(conn)
+}
+
+// targetNoPassCheck 请求目标检测, 如果策略检测结果为不允许访问则返回true
+func (h *Handler) targetNoPassCheck(ctx context.Context, target Target) bool {
+	var poolStatus *PoolStats
+	if pool, ok := h.cfg.Sessions.(*SessionPool); ok {
+		poolStatus = pool.CachedStatus()
+	}
+
+	req := NewTargetReq(target, poolStatus)
+	rsp, err := policy.GetCheck(ctx, req)
+	if err != nil {
+		h.log.Error("请求目标策略检测执行失败", log.Event, "dial_target_check_error", log.Target, target.String())
+		return false
+	}
+
+	return rsp.GetMsg("pass") == "no"
 }
 
 // dialAndConnect 取会话 → 开流 → CONNECT_REQ/RESP。

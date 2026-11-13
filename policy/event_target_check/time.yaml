@@ -1,0 +1,21 @@
+Meta:
+  ID: 1001
+  Name: 定时关闭所有策略
+  Enabled: true
+  GrayCount: 10000
+  Priority: 1000
+  Owner: lizec
+  Description: |
+    在夜晚的特定时间段拒绝所有请求
+    使得客户端进入静默状态, 减少不必要的流量
+Filter:
+  - Name: 判断事件
+    When: Req.GetEvent() == 'event_target_check'
+Action:
+  - Name: 判断是否位于时间范围内
+    WhenAny:
+      - Req.NowTime.Hour() >= 22
+      - Req.NowTime.Hour() < 8
+    ThenList:
+      - Rsp.SetMsg('pass', 'no')
+      - Sys.ExitGroup()   

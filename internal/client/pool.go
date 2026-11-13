@@ -110,9 +110,13 @@ type SessionPool struct {
 	creating int
 	waiters  int
 	rebuilds uint64
-	backoff  time.Duration
-	closed   bool
-	notify   chan struct{}
+
+	// 缓存的上一次统计结构, 非实时场景可使用此字段低开销查询状态
+	cachedStatus *PoolStats
+
+	backoff time.Duration
+	closed  bool
+	notify  chan struct{}
 
 	onDropMu sync.Mutex
 	onDrop   func(*mux.Session)
@@ -350,7 +354,14 @@ func (p *SessionPool) Stats() PoolStats {
 		st.SRTTVar /= int32(count)
 	}
 
+	// 返回值会拷贝一份, 因此cache的这个可以安全的保存
+	p.cachedStatus = &st
 	return st
+}
+
+// 返回缓存的状态信息, 无计算开销和锁开销, 更新取决于 Stats 函数
+func (p *SessionPool) CachedStatus() *PoolStats {
+	return p.cachedStatus
 }
 
 // ---- 内部实现 ----
