@@ -14,7 +14,7 @@ Filter:
 Action:
   - Name: 判断是否位于时间范围内
     WhenAny:
-      - Req.NowTime.Hour() >= 22
+      - Req.NowTime.Hour() >= 23
       - Req.NowTime.Hour() < 8
     ThenList:
       - Rsp.SetMsg('pass', 'no')

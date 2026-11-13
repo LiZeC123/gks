@@ -14,7 +14,7 @@ Filter:
   - Name: Chrome常见后台请求域名
     WhenAny:
       - Req.Host endsWith '.googleapis.com'
-      - Req.Host in ['mail.google.com', 'play.google.com', 'www.google.com', 'clients4.google.com', 'clients2.google.com'] 
+      - Req.Host in ['mail.google.com', 'play.google.com', 'clients4.google.com', 'clients2.google.com'] 
   - Name: 连接池数量小于阈值
     WhenAll: 
       - Req.PoolStatus.InUse > 0
