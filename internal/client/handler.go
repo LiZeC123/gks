@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -149,7 +150,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 			h.log.Error("连接处理 panic",
 				log.Event, "panic",
 				log.Remote, conn.RemoteAddr().String(),
-				"panic", fmt.Sprint(r),
+				"panic", fmt.Sprint(r), "stack", debug.Stack(),
 			)
 		}
 	}()
@@ -168,9 +169,6 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// 记录最近的拨号目标
-	metrics.Default.TargetBuf.Write(target.Address())
-
 	// 策略检查
 	noPass := h.targetNoPassCheck(ctx, target)
 	if noPass {
@@ -180,6 +178,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 			log.Target, target.String())
 		return
 	}
+
+	// 记录最近的拨号目标
+	nowStr := time.Now().Format(time.TimeOnly)
+	metrics.Default.TargetBuf.Write(fmt.Sprintf("%s | %s", nowStr, target.Address()))
 
 	sess, stream, resp, err := h.dialAndConnect(ctx, target)
 	if err != nil {
@@ -247,7 +249,7 @@ func (h *Handler) targetNoPassCheck(ctx context.Context, target Target) bool {
 	req := NewTargetReq(target, poolStatus)
 	rsp, err := policy.GetCheck(ctx, req)
 	if err != nil {
-		h.log.Error("请求目标策略检测执行失败", log.Event, "dial_target_check_error", log.Target, target.String())
+		h.log.Error("请求目标策略检测执行失败", log.Event, "dial_target_check_error", log.Target, target.String(), "err", err)
 		return false
 	}
 
